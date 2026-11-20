@@ -1,37 +1,39 @@
 package com.auricle.app.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Favorite
-import androidx.compose.material.icons.rounded.FavoriteBorder
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.auricle.app.model.SongItem
 import com.auricle.app.ui.theme.AuricleTheme
+import kotlin.math.abs
 
 @Composable
 fun MiniPlayer(
@@ -40,9 +42,13 @@ fun MiniPlayer(
     isLoading: Boolean,
     currentPositionMs: Long,
     durationMs: Long,
-    isLiked: Boolean,
-    onLikeToggle: () -> Unit,
+    isLiked: Boolean = false,
+    onLikeToggle: () -> Unit = {},
     onPlayPauseClick: () -> Unit,
+    onNextClick: () -> Unit = {},
+    onPreviousClick: () -> Unit = {},
+    isInParty: Boolean = false,
+    artworkModifier: Modifier = Modifier,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -54,119 +60,160 @@ fun MiniPlayer(
     ) {
         if (currentTrack == null) return@AnimatedVisibility
 
-        val progress = if (durationMs > 0) {
-            (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-        } else 0f
+        var offsetX by remember { mutableStateOf(0f) }
+        val animatedOffsetX by animateFloatAsState(targetValue = offsetX)
 
-        Surface(
+        AuricleGlassBox(
+            shape = RoundedCornerShape(16.dp),
+            fallbackColor = AuricleTheme.colors.miniPlayerGlass,
+            borderColor = AuricleTheme.colors.border,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .clickable { onClick() },
-            shape = RoundedCornerShape(16.dp),
-            color = AuricleTheme.colors.surface2.copy(alpha = 0.95f),
-            tonalElevation = 6.dp,
-            shadowElevation = 8.dp
+                .padding(horizontal = 8.dp)
+                .height(64.dp)
+                .graphicsLayer { translationX = animatedOffsetX }
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragEnd = {
+                            if (offsetX < -48.dp.toPx()) {
+                                onNextClick()
+                            } else if (offsetX > 48.dp.toPx()) {
+                                onPreviousClick()
+                            }
+                            offsetX = 0f
+                        },
+                        onDragCancel = { offsetX = 0f }
+                    ) { change, dragAmount ->
+                        change.consume()
+                        offsetX += dragAmount.x
+                        if (dragAmount.y < -30f && abs(offsetX) < 20f) {
+                            onClick()
+                        }
+                    }
+                }
+                .clickable { onClick() }
         ) {
-            Column {
-                // Thin progress line at the top
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.5.dp),
-                    color = AuricleTheme.colors.accent,
-                    trackColor = Color.Transparent,
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = 11.dp, end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(currentTrack.displayArtworkUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "Album Art",
+                    contentScale = ContentScale.Crop,
+                    modifier = artworkModifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AuricleTheme.colors.fillMed)
                 )
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                Spacer(Modifier.width(12.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    // Artwork (50dp rounded)
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(currentTrack.displayArtworkUrl)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = "Album Art",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(50.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(AuricleTheme.colors.surface)
+                    Text(
+                        text = currentTrack.title,
+                        style = AuricleTheme.typography.bodySB,
+                        color = AuricleTheme.colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-
-                    // Title & Artist
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = currentTrack.title,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = AuricleTheme.colors.textPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = currentTrack.artist,
-                            fontSize = 12.sp,
-                            color = AuricleTheme.colors.textMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    // Like Button
-                    IconButton(
-                        onClick = onLikeToggle,
-                        modifier = Modifier
-                            .semantics { contentDescription = if (isLiked) "Unlike" else "Like" }
-                            .testTag("MiniPlayerLike")
-                            .size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                            contentDescription = if (isLiked) "Unlike" else "Like",
-                            tint = if (isLiked) AuricleTheme.colors.danger else AuricleTheme.colors.textMuted,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    // Play/Pause Button
-                    Box(
-                        modifier = Modifier
-                            .semantics { contentDescription = if (isPlaying) "Pause" else "Play" }
-                            .testTag(if (isPlaying) "Pause" else "Play")
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(AuricleTheme.colors.accent)
-                            .clickable { onPlayPauseClick() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isInParty) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(AuricleTheme.colors.success)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "${currentTrack.artist} · Party",
+                                style = AuricleTheme.typography.sub,
+                                color = AuricleTheme.colors.textMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         } else {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp)
+                            Text(
+                                text = currentTrack.artist,
+                                style = AuricleTheme.typography.sub,
+                                color = AuricleTheme.colors.textMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
+
+                Box(
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(40.dp)
+                        .auriclePressClickable(
+                            hapticType = androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove,
+                            onClick = onPlayPauseClick
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = AuricleTheme.colors.textPrimary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (isPlaying) AuricleIcons.Pause else AuricleIcons.Play,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = AuricleTheme.colors.textPrimary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                Box(
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(40.dp)
+                        .auriclePressClickable(onClick = onNextClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = AuricleIcons.Next,
+                        contentDescription = "Next",
+                        tint = AuricleTheme.colors.textPrimary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
+            // Progress bar
+            val progress = if (durationMs > 0) (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 12.dp, end = 12.dp, bottom = 2.dp)
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(AuricleTheme.colors.fillMed)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progress)
+                        .background(AuricleTheme.colors.accentStrong)
+                )
             }
         }
     }

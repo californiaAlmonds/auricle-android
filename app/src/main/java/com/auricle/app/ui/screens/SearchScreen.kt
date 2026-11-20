@@ -1,27 +1,42 @@
 package com.auricle.app.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -29,51 +44,89 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.auricle.app.AuricleApp
+import com.auricle.app.data.LibraryRepository
 import com.auricle.app.data.MusicRepository
+import com.auricle.app.data.SettingsRepository
 import com.auricle.app.model.*
 import com.auricle.app.playback.PlaybackController
-import com.auricle.app.ui.components.SongRow
+import com.auricle.app.ui.components.*
 import com.auricle.app.ui.theme.AuricleTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private data class CategoryTile(
+    val title: String,
+    val startColor: Color,
+    val endColor: Color
+)
+
+private val BrowseCategories = listOf(
+    CategoryTile("Top Hits", Color(0xFFE2503F), Color(0xFFF2703A)),
+    CategoryTile("Chill Lofi", Color(0xFF8B5CF6), Color(0xFF46A6E6)),
+    CategoryTile("Bollywood", Color(0xFFF2703A), Color(0xFFB06A43)),
+    CategoryTile("Punjabi", Color(0xFF3FA96A), Color(0xFF1699A8)),
+    CategoryTile("Indie", Color(0xFF46A6E6), Color(0xFF1699A8)),
+    CategoryTile("Romance", Color(0xFFE26AA0), Color(0xFFE2503F)),
+    CategoryTile("Synthwave", Color(0xFFE26AA0), Color(0xFF8B5CF6)),
+    CategoryTile("Bengali", Color(0xFFB06A43), Color(0xFFE2503F))
+)
+
 @Composable
 fun SearchScreen(
     musicRepo: MusicRepository,
+    settingsRepo: SettingsRepository = (LocalContext.current.applicationContext as AuricleApp).settingsRepository,
+    libraryRepo: LibraryRepository = (LocalContext.current.applicationContext as AuricleApp).libraryRepository,
     playbackController: PlaybackController,
     onSongOptionsClick: (SongItem) -> Unit,
     onAlbumClick: (AlbumItem) -> Unit,
     onArtistClick: (ArtistItem) -> Unit,
     onPlaylistClick: (PlaylistItem) -> Unit,
+    albumArtworkModifier: @Composable (String) -> Modifier = { Modifier },
+    bottomContentPadding: Dp = 156.dp,
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val focusRequester = remember { FocusRequester() }
+
+    val settings by settingsRepo.settings.collectAsState()
+    val currentPlayingTrack by playbackController.currentTrack.collectAsState()
+    val isPlaying by playbackController.isPlaying.collectAsState()
 
     var query by remember { mutableStateOf("") }
+    var isSearchFocused by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf("All") }
     var searchResults by remember { mutableStateOf<SearchResultData?>(null) }
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
-    var recentSearches by remember { mutableStateOf(listOf("Top Hits", "Chill Lofi", "Synthwave")) }
     var isLoading by remember { mutableStateOf(false) }
-
-    val currentPlayingTrack by playbackController.currentTrack.collectAsState()
 
     var suggestionJob by remember { mutableStateOf<Job?>(null) }
 
+    val listState = rememberLazyListState()
+    val isCollapsed by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 72
+        }
+    }
+
+    val isActiveMode = isSearchFocused || query.isNotBlank() || searchResults != null
+
     fun executeSearch(searchQuery: String, category: String = selectedCategory) {
-        if (searchQuery.isBlank()) return
+        val trimmed = searchQuery.trim()
+        if (trimmed.isBlank()) return
         keyboardController?.hide()
+        focusManager.clearFocus()
         suggestions = emptyList()
 
-        if (!recentSearches.contains(searchQuery.trim())) {
-            recentSearches = listOf(searchQuery.trim()) + recentSearches.take(9)
-        }
+        settingsRepo.addRecentSearch(trimmed)
 
         isLoading = true
         coroutineScope.launch {
@@ -84,7 +137,7 @@ fun SearchScreen(
                 "playlists" -> "playlists"
                 else -> "all"
             }
-            val result = musicRepo.search(searchQuery.trim(), catParam)
+            val result = musicRepo.search(trimmed, catParam)
             result.onSuccess { data ->
                 searchResults = data
                 isLoading = false
@@ -107,377 +160,316 @@ fun SearchScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .background(AuricleTheme.colors.canvas)
+            .background(AuricleTheme.colors.bg)
     ) {
-        // Search Input Bar
-        Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = {
-                    query = it
-                    if (it.isBlank()) {
-                        searchResults = null
-                    }
-                },
-                placeholder = {
-                    Text(
-                        text = "Search songs, albums, artists...",
-                        fontSize = 14.sp,
-                        color = AuricleTheme.colors.textMuted
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = "Search icon",
-                        tint = AuricleTheme.colors.textMuted
-                    )
-                },
-                trailingIcon = {
-                    if (query.isNotBlank()) {
-                        IconButton(
-                            onClick = {
-                                query = ""
-                                searchResults = null
-                                suggestions = emptyList()
-                            },
-                            modifier = Modifier.semantics { contentDescription = "Clear search" }.testTag("ClearSearch")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "Clear",
-                                tint = AuricleTheme.colors.textMuted
-                            )
-                        }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = AuricleTheme.colors.surface2,
-                    unfocusedContainerColor = AuricleTheme.colors.surface,
-                    focusedBorderColor = AuricleTheme.colors.accent,
-                    unfocusedBorderColor = AuricleTheme.colors.border,
-                    focusedTextColor = AuricleTheme.colors.textPrimary,
-                    unfocusedTextColor = AuricleTheme.colors.textPrimary
-                ),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { executeSearch(query) }),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("SearchInput")
-            )
-        }
-
-        // Category Filter Chips
-        val categories = listOf("All", "Songs", "Albums", "Artists", "Playlists")
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(bottom = 8.dp)
-        ) {
-            items(categories) { category ->
-                val isSelected = selectedCategory == category
-                Box(
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Search Input Header Bar
+            if (isActiveMode) {
+                // Active Mode Header (Input + Cancel button)
+                Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) AuricleTheme.colors.accent else AuricleTheme.colors.surface)
-                        .border(1.dp, if (isSelected) AuricleTheme.colors.accent else AuricleTheme.colors.border, RoundedCornerShape(16.dp))
-                        .clickable {
-                            selectedCategory = category
-                            if (query.isNotBlank()) {
-                                executeSearch(query, category)
-                            }
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Active Search Input Field
+                    LaunchedEffect(Unit) {
+                        if (isSearchFocused && query.isEmpty() && searchResults == null) {
+                            runCatching { focusRequester.requestFocus() }
                         }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = category,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isSelected) Color.White else AuricleTheme.colors.textPrimary
-                    )
-                }
-            }
-        }
-
-        // Content Area
-        Box(modifier = Modifier.weight(1f)) {
-            if (isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = AuricleTheme.colors.accent, strokeWidth = 3.dp)
-                }
-            } else if (suggestions.isNotEmpty() && searchResults == null) {
-                // Live Autocomplete Suggestions
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    items(suggestions) { item ->
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(AuricleTheme.colors.fillMed)
+                            .border(
+                                1.5.dp,
+                                if (isSearchFocused) AuricleTheme.colors.accent else Color.Transparent,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable {
-                                    query = item
-                                    executeSearch(item)
-                                }
-                                .padding(vertical = 12.dp, horizontal = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            modifier = Modifier.fillMaxSize()
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.Search,
-                                contentDescription = null,
+                                imageVector = AuricleIcons.Search,
+                                contentDescription = "Search",
                                 tint = AuricleTheme.colors.textMuted,
                                 modifier = Modifier.size(18.dp)
                             )
-                            Text(
-                                text = item,
-                                fontSize = 14.sp,
-                                color = AuricleTheme.colors.textPrimary
-                            )
+                            Spacer(Modifier.width(8.dp))
+                            Box(modifier = Modifier.weight(1f)) {
+                                if (query.isEmpty()) {
+                                    Text(
+                                        text = "Songs, albums, artists",
+                                        style = AuricleTheme.typography.body,
+                                        color = AuricleTheme.colors.textMuted
+                                    )
+                                }
+                                BasicTextField(
+                                    value = query,
+                                    onValueChange = {
+                                        query = it
+                                        if (it.isBlank()) {
+                                            searchResults = null
+                                        }
+                                    },
+                                    singleLine = true,
+                                    textStyle = AuricleTheme.typography.body.copy(color = AuricleTheme.colors.textPrimary),
+                                    cursorBrush = SolidColor(AuricleTheme.colors.accent),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(onSearch = { executeSearch(query) }),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(focusRequester)
+                                        .onFocusChanged { isSearchFocused = it.isFocused }
+                                        .testTag("SearchInput")
+                                )
+                            }
+                            if (query.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(AuricleTheme.colors.fillSoft)
+                                        .clickable {
+                                            query = ""
+                                            searchResults = null
+                                            suggestions = emptyList()
+                                        }
+                                        .testTag("ClearSearch"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = AuricleIcons.Close,
+                                        contentDescription = "Clear",
+                                        tint = AuricleTheme.colors.textDim,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
                         }
+                    }
+
+                    // Cancel Text Button
+                    Text(
+                        text = "Cancel",
+                        style = AuricleTheme.typography.bodySB,
+                        color = AuricleTheme.colors.accentStrong,
+                        modifier = Modifier
+                            .clickable {
+                                query = ""
+                                searchResults = null
+                                suggestions = emptyList()
+                                isSearchFocused = false
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            }
+                            .padding(vertical = 8.dp)
+                    )
+                }
+
+                // Filter chips row
+                val categories = listOf("All", "Songs", "Albums", "Artists", "Playlists")
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    items(categories) { cat ->
+                        AuricleFilterChip(
+                            label = cat,
+                            selected = selectedCategory == cat,
+                            onClick = {
+                                selectedCategory = cat
+                                if (query.isNotBlank()) {
+                                    executeSearch(query, cat)
+                                }
+                            }
+                        )
                     }
                 }
-            } else if (searchResults != null) {
-                val res = searchResults!!
+            }
 
+            // Body Area
+            if (!isActiveMode) {
+                // Browse Mode: Large Title + Search Input + Recent searches + Browse Categories
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 120.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    contentPadding = PaddingValues(bottom = bottomContentPadding),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
                 ) {
-                    // Corrected Query Notice
-                    if (!res.correctedQuery.isNullOrBlank()) {
-                        item {
+                    // Large Title Header
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .padding(horizontal = 20.dp, vertical = 12.dp)
+                        ) {
                             Text(
-                                text = "Showing results for \"${res.correctedQuery}\"",
-                                fontSize = 13.sp,
-                                color = AuricleTheme.colors.accent,
-                                modifier = Modifier.padding(horizontal = 16.dp)
+                                text = "Search",
+                                style = AuricleTheme.typography.large,
+                                color = AuricleTheme.colors.textPrimary
                             )
-                        }
-                    }
+                            Spacer(Modifier.height(16.dp))
 
-                    // Top Result
-                    if (res.topResult != null) {
-                        item {
-                            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                Text(
-                                    text = "Top Result",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AuricleTheme.colors.textPrimary
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                SongRow(
-                                    song = res.topResult,
-                                    isPlaying = currentPlayingTrack?.videoId == res.topResult.videoId,
-                                    onClick = {
-                                        playbackController.playTrack(res.topResult, res.songs.ifEmpty { listOf(res.topResult) })
-                                    },
-                                    onQuickAddQueue = { playbackController.addToQueue(res.topResult) },
-                                    onOptionsClick = { onSongOptionsClick(res.topResult) }
-                                )
+                            // Search Input Box
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(AuricleTheme.colors.fillMed)
+                                    .clickable {
+                                        isSearchFocused = true
+                                    }
+                                    .padding(horizontal = 14.dp)
+                                    .testTag("SearchInput"),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    Icon(
+                                        imageVector = AuricleIcons.Search,
+                                        contentDescription = "Search",
+                                        tint = AuricleTheme.colors.textMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "Songs, albums, artists",
+                                        style = AuricleTheme.typography.body,
+                                        color = AuricleTheme.colors.textMuted
+                                    )
+                                }
                             }
                         }
                     }
 
-                    // Songs Results
-                    if (res.songs.isNotEmpty()) {
+                    // Recent Searches
+                    val recentList = settings.recentSearches
+                    if (recentList.isNotEmpty()) {
                         item {
-                            Text(
-                                text = "Songs",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = AuricleTheme.colors.textPrimary,
-                                modifier = Modifier.padding(horizontal = 16.dp)
-                            )
-                        }
-
-                        items(res.songs) { song ->
-                            SongRow(
-                                song = song,
-                                isPlaying = currentPlayingTrack?.videoId == song.videoId,
-                                onClick = {
-                                    playbackController.playTrack(song, res.songs)
-                                },
-                                onQuickAddQueue = {
-                                    playbackController.addToQueue(song)
-                                },
-                                onOptionsClick = {
-                                    onSongOptionsClick(song)
-                                }
-                            )
-                        }
-                    }
-
-                    // Albums Results
-                    if (res.albums.isNotEmpty()) {
-                        item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "Albums",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AuricleTheme.colors.textPrimary,
-                                    modifier = Modifier.padding(horizontal = 16.dp)
-                                )
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 16.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    items(res.albums) { album ->
-                                        Column(
-                                            modifier = Modifier
-                                                .width(140.dp)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { onAlbumClick(album) }
-                                                .padding(4.dp)
-                                        ) {
-                                            AsyncImage(
-                                                model = ImageRequest.Builder(LocalContext.current)
-                                                    .data(album.thumbnailUrl)
-                                                    .crossfade(true)
-                                                    .build(),
-                                                contentDescription = null,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(132.dp)
-                                                    .clip(RoundedCornerShape(10.dp))
-                                                    .background(AuricleTheme.colors.surface)
-                                            )
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Text(
-                                                text = album.title,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = AuricleTheme.colors.textPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = album.artist,
-                                                fontSize = 11.sp,
-                                                color = AuricleTheme.colors.textMuted,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
+                                    Text(
+                                        text = "Recent searches",
+                                        style = AuricleTheme.typography.headline,
+                                        color = AuricleTheme.colors.textPrimary
+                                    )
+                                    Text(
+                                        text = "Clear",
+                                        style = AuricleTheme.typography.subSB,
+                                        color = AuricleTheme.colors.accentStrong,
+                                        modifier = Modifier
+                                            .clickable { settingsRepo.clearRecentSearches() }
+                                            .padding(4.dp)
+                                    )
+                                }
+
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(recentList) { term ->
+                                        AuricleFilterChip(
+                                            label = term,
+                                            selected = false,
+                                            onClick = {
+                                                query = term
+                                                executeSearch(term)
+                                            }
+                                        )
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Artists Results
-                    if (res.artists.isNotEmpty()) {
-                        item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "Artists",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AuricleTheme.colors.textPrimary,
-                                    modifier = Modifier.padding(horizontal = 16.dp)
-                                )
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    // Browse Categories Section
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            Text(
+                                text = "Browse categories",
+                                style = AuricleTheme.typography.title2,
+                                color = AuricleTheme.colors.textPrimary
+                            )
+
+                            // 2-column Category Tiles
+                            val pairs = BrowseCategories.chunked(2)
+                            pairs.forEach { rowPairs ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
-                                    items(res.artists) { artist ->
-                                        Column(
+                                    rowPairs.forEach { cat ->
+                                        Box(
                                             modifier = Modifier
-                                                .width(120.dp)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { onArtistClick(artist) }
-                                                .padding(4.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
+                                                .weight(1f)
+                                                .height(104.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .background(Brush.linearGradient(listOf(cat.startColor, cat.endColor)))
+                                                .auriclePressClickable {
+                                                    query = cat.title
+                                                    executeSearch(cat.title)
+                                                }
                                         ) {
-                                            AsyncImage(
-                                                model = ImageRequest.Builder(LocalContext.current)
-                                                    .data(artist.thumbnailUrl)
-                                                    .crossfade(true)
-                                                    .build(),
-                                                contentDescription = null,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(100.dp)
-                                                    .clip(CircleShape)
-                                                    .background(AuricleTheme.colors.surface)
-                                            )
-                                            Spacer(modifier = Modifier.height(6.dp))
                                             Text(
-                                                text = artist.name,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = AuricleTheme.colors.textPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                                text = cat.title,
+                                                style = AuricleTheme.typography.headline,
+                                                color = Color.White,
+                                                modifier = Modifier
+                                                    .padding(14.dp)
+                                                    .align(Alignment.TopStart)
                                             )
+                                            // Decorative rotated card
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomEnd)
+                                                    .offset(x = 10.dp, y = 10.dp)
+                                                    .size(76.dp)
+                                                    .graphicsLayer { rotationZ = 18f }
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(Color.White.copy(alpha = 0.22f))
+                                                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(8.dp)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = AuricleIcons.Music,
+                                                    contentDescription = null,
+                                                    tint = Color.White.copy(alpha = 0.85f),
+                                                    modifier = Modifier.size(28.dp)
+                                                )
+                                            }
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    // Playlists Results
-                    if (res.playlists.isNotEmpty()) {
-                        item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "Playlists",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AuricleTheme.colors.textPrimary,
-                                    modifier = Modifier.padding(horizontal = 16.dp)
-                                )
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 16.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    items(res.playlists) { playlist ->
-                                        Column(
-                                            modifier = Modifier
-                                                .width(140.dp)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { onPlaylistClick(playlist) }
-                                                .padding(4.dp)
-                                        ) {
-                                            AsyncImage(
-                                                model = ImageRequest.Builder(LocalContext.current)
-                                                    .data(playlist.thumbnailUrl)
-                                                    .crossfade(true)
-                                                    .build(),
-                                                contentDescription = null,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(132.dp)
-                                                    .clip(RoundedCornerShape(10.dp))
-                                                    .background(AuricleTheme.colors.surface)
-                                            )
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Text(
-                                                text = playlist.title,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = AuricleTheme.colors.textPrimary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = playlist.author,
-                                                fontSize = 11.sp,
-                                                color = AuricleTheme.colors.textMuted,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
+                                    if (rowPairs.size == 1) {
+                                        Spacer(Modifier.weight(1f))
                                     }
                                 }
                             }
@@ -485,80 +477,341 @@ fun SearchScreen(
                     }
                 }
             } else {
-                // Default: Recent Search History
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    if (recentSearches.isNotEmpty()) {
-                        item {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Recent Searches",
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = AuricleTheme.colors.textPrimary
-                                )
-                                Text(
-                                    text = "Clear All",
-                                    fontSize = 12.sp,
-                                    color = AuricleTheme.colors.accent,
-                                    modifier = Modifier.clickable { recentSearches = emptyList() }
-                                )
-                            }
-                        }
-
-                        items(recentSearches) { item ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        query = item
-                                        executeSearch(item)
-                                    }
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                // Active Mode Body: Loading, Suggestions, or Search Results
+                Box(modifier = Modifier.weight(1f)) {
+                    if (isLoading) {
+                        FeedLoadingSkeleton(modifier = Modifier.fillMaxWidth())
+                    } else if (suggestions.isNotEmpty() && searchResults == null) {
+                        // Live Autocomplete Suggestions
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                        ) {
+                            items(suggestions) { item ->
                                 Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            query = item
+                                            executeSearch(item)
+                                        }
+                                        .padding(vertical = 12.dp, horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Rounded.History,
+                                        imageVector = AuricleIcons.Search,
                                         contentDescription = null,
                                         tint = AuricleTheme.colors.textMuted,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text(
                                         text = item,
-                                        fontSize = 14.sp,
+                                        style = AuricleTheme.typography.body,
                                         color = AuricleTheme.colors.textPrimary
                                     )
                                 }
+                            }
+                        }
+                    } else if (searchResults != null) {
+                        val res = searchResults!!
 
-                                IconButton(
-                                    onClick = { recentSearches = recentSearches.filterNot { it == item } },
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Close,
-                                        contentDescription = "Remove",
-                                        tint = AuricleTheme.colors.textDim,
-                                        modifier = Modifier.size(16.dp)
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = bottomContentPadding),
+                            verticalArrangement = Arrangement.spacedBy(20.dp)
+                        ) {
+                            // Corrected Query Notice
+                            if (!res.correctedQuery.isNullOrBlank()) {
+                                item {
+                                    Text(
+                                        text = "Showing results for \"${res.correctedQuery}\"",
+                                        style = AuricleTheme.typography.subSB,
+                                        color = AuricleTheme.colors.accentStrong,
+                                        modifier = Modifier.padding(horizontal = 20.dp)
                                     )
+                                }
+                            }
+
+                            // 1. Top Result Card (in "All" category)
+                            if (selectedCategory == "All" && (res.topResult != null || res.artists.isNotEmpty())) {
+                                val topArtist = res.artists.firstOrNull()
+                                val topSong = res.topResult
+
+                                item {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 20.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "Top result",
+                                            style = AuricleTheme.typography.headline,
+                                            color = AuricleTheme.colors.textPrimary
+                                        )
+
+                                        if (topSong != null) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(104.dp)
+                                                    .clip(RoundedCornerShape(16.dp))
+                                                    .background(AuricleTheme.colors.surface2)
+                                                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
+                                                    .padding(16.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AsyncImage(
+                                                    model = ImageRequest.Builder(LocalContext.current)
+                                                        .data(topSong.displayArtworkUrl)
+                                                        .crossfade(true)
+                                                        .build(),
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(72.dp)
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(AuricleTheme.colors.surface)
+                                                )
+                                                Spacer(Modifier.width(14.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = topSong.title,
+                                                        style = AuricleTheme.typography.title2,
+                                                        color = AuricleTheme.colors.textPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Spacer(Modifier.height(2.dp))
+                                                    Text(
+                                                        text = "Song · ${topSong.artist}",
+                                                        style = AuricleTheme.typography.sub,
+                                                        color = AuricleTheme.colors.textMuted,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                                Spacer(Modifier.width(8.dp))
+                                                AuricleCircleIconButton(
+                                                    icon = AuricleIcons.Play,
+                                                    contentDescription = "Play",
+                                                    size = 48.dp,
+                                                    iconSize = 20.dp,
+                                                    containerColor = AuricleTheme.colors.primaryFill,
+                                                    tint = AuricleTheme.colors.onPrimaryFill,
+                                                    onClick = {
+                                                        playbackController.playTrack(
+                                                            topSong,
+                                                            res.songs.ifEmpty { listOf(topSong) },
+                                                            "Search Results"
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        } else if (topArtist != null) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(104.dp)
+                                                    .clip(RoundedCornerShape(16.dp))
+                                                    .background(AuricleTheme.colors.surface2)
+                                                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
+                                                    .auriclePressClickable { onArtistClick(topArtist) }
+                                                    .padding(16.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AsyncImage(
+                                                    model = ImageRequest.Builder(LocalContext.current)
+                                                        .data(topArtist.thumbnailUrl)
+                                                        .crossfade(true)
+                                                        .build(),
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(72.dp)
+                                                        .clip(CircleShape)
+                                                        .background(AuricleTheme.colors.surface)
+                                                )
+                                                Spacer(Modifier.width(14.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = topArtist.name,
+                                                        style = AuricleTheme.typography.title2,
+                                                        color = AuricleTheme.colors.textPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Spacer(Modifier.height(2.dp))
+                                                    Text(
+                                                        text = "Artist",
+                                                        style = AuricleTheme.typography.sub,
+                                                        color = AuricleTheme.colors.textMuted
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 2. Songs Section
+                            if (res.songs.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Songs")) {
+                                val songsToShow = if (selectedCategory == "All") res.songs.take(5) else res.songs
+                                item {
+                                    Column {
+                                        AuricleSectionHeader(
+                                            title = "Songs",
+                                            showChevron = false,
+                                            modifier = Modifier.padding(horizontal = 20.dp)
+                                        )
+                                        songsToShow.forEachIndexed { idx, song ->
+                                            SongRow(
+                                                song = song,
+                                                isPlaying = currentPlayingTrack?.videoId == song.videoId,
+                                                isActivelyPlaying = isPlaying,
+                                                onClick = {
+                                                    playbackController.playTrack(song, res.songs, "Search Results")
+                                                },
+                                                onQuickAddQueue = {
+                                                    playbackController.addToQueue(song)
+                                                },
+                                                onOptionsClick = {
+                                                    onSongOptionsClick(song)
+                                                },
+                                                showDivider = idx < songsToShow.lastIndex
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 3. Albums Section
+                            if (res.albums.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Albums")) {
+                                item {
+                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        AuricleSectionHeader(
+                                            title = "Albums",
+                                            showChevron = false,
+                                            modifier = Modifier.padding(horizontal = 20.dp)
+                                        )
+                                        if (selectedCategory == "All") {
+                                            LazyRow(
+                                                contentPadding = PaddingValues(horizontal = 20.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                            ) {
+                                                items(res.albums) { album ->
+                                                    AlbumCard(
+                                                        title = album.title,
+                                                        subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
+                                                        artworkUrl = album.thumbnailUrl,
+                                                        onClick = { onAlbumClick(album) },
+                                                        width = 160.dp,
+                                                        artworkModifier = albumArtworkModifier(album.browseId.ifBlank { album.title })
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            // 2-column grid in Albums filter
+                                            val rows = res.albums.chunked(2)
+                                            rows.forEach { rowAlbums ->
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 20.dp),
+                                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                ) {
+                                                    rowAlbums.forEach { album ->
+                                                        AlbumCard(
+                                                            title = album.title,
+                                                            subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
+                                                            artworkUrl = album.thumbnailUrl,
+                                                            onClick = { onAlbumClick(album) },
+                                                            modifier = Modifier.weight(1f),
+                                                            artworkModifier = albumArtworkModifier(album.browseId.ifBlank { album.title })
+                                                        )
+                                                    }
+                                                    if (rowAlbums.size == 1) {
+                                                        Spacer(Modifier.weight(1f))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 4. Artists Section
+                            if (res.artists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Artists")) {
+                                item {
+                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        AuricleSectionHeader(
+                                            title = "Artists",
+                                            showChevron = false,
+                                            modifier = Modifier.padding(horizontal = 20.dp)
+                                        )
+                                        LazyRow(
+                                            contentPadding = PaddingValues(horizontal = 20.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                        ) {
+                                            items(res.artists) { artist ->
+                                                ArtistCircleCard(
+                                                    name = artist.name,
+                                                    artworkUrl = artist.thumbnailUrl,
+                                                    onClick = { onArtistClick(artist) },
+                                                    size = 96.dp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 5. Playlists Section
+                            if (res.playlists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Playlists")) {
+                                item {
+                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        AuricleSectionHeader(
+                                            title = "Playlists",
+                                            showChevron = false,
+                                            modifier = Modifier.padding(horizontal = 20.dp)
+                                        )
+                                        LazyRow(
+                                            contentPadding = PaddingValues(horizontal = 20.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                        ) {
+                                            items(res.playlists) { playlist ->
+                                                AlbumCard(
+                                                    title = playlist.title,
+                                                    subtitle = "Playlist · ${playlist.author}",
+                                                    artworkUrl = playlist.thumbnailUrl,
+                                                    onClick = { onPlaylistClick(playlist) },
+                                                    width = 160.dp
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Pinned Collapsed Top Bar for Browse Mode
+        if (!isActiveMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+            ) {
+                AuricleCollapsedTopBar(
+                    title = "Search",
+                    visible = isCollapsed,
+                    actions = {}
+                )
             }
         }
     }

@@ -1,12 +1,14 @@
 package com.auricle.app.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Headphones
-import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -24,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.auricle.app.model.PartySnapshot
 import com.auricle.app.ui.theme.AuricleTheme
+import com.auricle.app.ui.theme.AuricleBrandGradient
 
 @Composable
 fun AuricleTopBar(
@@ -49,18 +52,11 @@ fun AuricleTopBar(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                AuricleTheme.colors.accent,
-                                Color(0xFF8B5CF6)
-                            )
-                        )
-                    ),
+                    .background(AuricleBrandGradient),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Headphones,
+                    imageVector = AuricleIcons.Sparkles,
                     contentDescription = "Auricle Logo",
                     tint = Color.White,
                     modifier = Modifier.size(20.dp)
@@ -93,15 +89,92 @@ fun AuricleTopBar(
                     .testTag("Settings")
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(AuricleTheme.colors.surface)
+                    .background(AuricleTheme.colors.fillSoft)
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Settings,
+                    imageVector = AuricleIcons.Settings,
                     contentDescription = "Settings",
                     tint = AuricleTheme.colors.textMuted,
                     modifier = Modifier.size(20.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun AuricleCollapsibleHeader(
+    title: String,
+    collapsedProgress: Float,
+    actions: @Composable RowScope.() -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .height(56.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Bottom
+    ) {
+        Text(
+            text = title,
+            style = AuricleTheme.typography.large,
+            color = AuricleTheme.colors.textPrimary,
+            modifier = Modifier.weight(1f)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            actions()
+        }
+    }
+}
+
+@Composable
+fun AuricleCollapsedTopBar(
+    title: String,
+    visible: Boolean,
+    actions: @Composable RowScope.() -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut()
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .auricleGlass(
+                    shape = RoundedCornerShape(0.dp),
+                    fallbackColor = AuricleTheme.colors.tabBarGlass,
+                    borderColor = Color.Transparent
+                )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .height(56.dp)
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = title,
+                    style = AuricleTheme.typography.headline,
+                    color = AuricleTheme.colors.textPrimary,
+                    maxLines = 1
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    actions()
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(AuricleTheme.colors.border)
+            )
         }
     }
 }

@@ -8,9 +8,11 @@ import com.auricle.app.data.MusicRepository
 import com.auricle.app.data.SettingsRepository
 import com.auricle.app.extractor.NewPipeFallbackExtractor
 import com.auricle.app.playback.PlaybackController
+import com.auricle.app.updater.UpdateRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class AuricleApp : Application() {
@@ -23,6 +25,8 @@ class AuricleApp : Application() {
     lateinit var settingsRepository: SettingsRepository
         private set
     lateinit var playbackController: PlaybackController
+        private set
+    lateinit var updateRepository: UpdateRepository
         private set
 
     override fun onCreate() {
@@ -46,11 +50,19 @@ class AuricleApp : Application() {
         musicRepository = MusicRepository(this)
         libraryRepository = LibraryRepository(this, appScope)
         settingsRepository = SettingsRepository(this, appScope)
+        updateRepository = UpdateRepository(this, appScope)
         playbackController = PlaybackController(
             context = this,
             musicRepo = musicRepository,
             libraryRepo = libraryRepository,
+            settingsRepo = settingsRepository,
             coroutineScope = appScope
         )
+
+        // Check for updates at most once per 24h after initial settings load
+        appScope.launch(Dispatchers.IO) {
+            delay(1500)
+            updateRepository.checkOnLaunchIfDue(settingsRepository.settings.value.autoCheckUpdates)
+        }
     }
 }
