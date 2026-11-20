@@ -23,3 +23,15 @@ local.properties
 *.p12
 *.apk
 *.aab
+
+# ── Editor / local agent config (not shipped) ─────────────────
+.vscode/
+.github/agents/
+.agents/
+GEMINI.md
+
+# ── Logs / temporary screenshots ──────────────────────────────
+*.log
+/shot*.png
+/.playwright-mcp/*
+
