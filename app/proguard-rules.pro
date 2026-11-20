@@ -24,6 +24,7 @@
     @kotlinx.serialization.SerialName *;
 }
 -keep class com.auricle.app.model.** { *; }
+-keep class com.auricle.app.updater.** { *; }
 
 # OkHttp & Okio
 -dontwarn okhttp3.**
