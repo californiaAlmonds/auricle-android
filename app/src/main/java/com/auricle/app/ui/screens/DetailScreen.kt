@@ -1,20 +1,15 @@
 package com.auricle.app.ui.screens
 
-import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,17 +21,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
-import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.auricle.app.AuricleApp
@@ -47,8 +38,9 @@ import com.auricle.app.playback.PlaybackController
 import com.auricle.app.ui.components.*
 import com.auricle.app.ui.theme.AuricleBrandGradient
 import com.auricle.app.ui.theme.AuricleTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class DetailTarget {
     data class Album(val albumItem: AlbumItem) : DetailTarget()
@@ -72,23 +64,25 @@ fun DetailScreen(
     onAlbumClick: (AlbumItem) -> Unit,
     onArtistClick: (ArtistItem) -> Unit = {},
     onBrowseHomeClick: () -> Unit = {},
+    onAlbumLongClick: ((AlbumItem) -> Unit)? = null,
+    onPlaylistSongOptionsClick: ((SongItem, UserPlaylist) -> Unit)? = null,
+    onItemOptionsClick: ((ContextMenuItem) -> Unit)? = null,
     coverArtworkModifier: @Composable (String) -> Modifier = { Modifier },
     bottomContentPadding: Dp = 156.dp,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBackClick)
 
-    val coroutineScope = rememberCoroutineScope()
-    val context = LocalContext.current
-
     val libraryState by libraryRepo.state.collectAsState()
     val currentPlayingTrack by playbackController.currentTrack.collectAsState()
     val isPlaying by playbackController.isPlaying.collectAsState()
 
-    var fullAlbum by remember { mutableStateOf<AlbumItem?>(null) }
-    var fullArtist by remember { mutableStateOf<ArtistItem?>(null) }
-    var fullPlaylist by remember { mutableStateOf<PlaylistItem?>(null) }
-    var isLoading by remember { mutableStateOf(false) }
+    var fullAlbum by remember(target) { mutableStateOf<AlbumItem?>(null) }
+    var fullArtist by remember(target) { mutableStateOf<ArtistItem?>(null) }
+    var fullPlaylist by remember(target) { mutableStateOf<PlaylistItem?>(null) }
+    var isLoading by remember(target) { mutableStateOf(false) }
+    var loadError by remember(target) { mutableStateOf<String?>(null) }
+    var retryTrigger by remember(target) { mutableIntStateOf(0) }
 
     val listState = rememberLazyListState()
     val isCollapsed by remember {
@@ -97,24 +91,40 @@ fun DetailScreen(
         }
     }
 
-    LaunchedEffect(target) {
+    LaunchedEffect(target, retryTrigger) {
+        loadError = null
         when (target) {
             is DetailTarget.Album -> {
                 if (target.albumItem.tracks.isEmpty()) {
                     isLoading = true
-                    coroutineScope.launch {
+                    try {
                         var browseId = target.albumItem.browseId
                         if (browseId.isBlank() && (target.albumItem.title.isNotBlank() || target.albumItem.artist.isNotBlank())) {
                             val q = "${target.albumItem.title} ${target.albumItem.artist}".trim()
-                            musicRepo.search(q, "albums").onSuccess { sRes ->
-                                browseId = sRes.albums.firstOrNull()?.browseId.orEmpty()
-                            }
+                            musicRepo.search(q, "albums")
+                                .onSuccess { sRes ->
+                                    browseId = sRes.albums.firstOrNull()?.browseId.orEmpty()
+                                }
+                                .onFailure { err ->
+                                    loadError = err.message ?: "Failed to load album"
+                                }
                         }
                         if (browseId.isNotBlank()) {
-                            musicRepo.getAlbum(browseId).onSuccess { fullAlbum = it }
-                        } else {
+                            loadError = null
+                            musicRepo.getAlbum(browseId)
+                                .onSuccess { fetched ->
+                                    fullAlbum = fetched.copy(
+                                        artist = fetched.artist.ifBlank { target.albumItem.artist },
+                                        thumbnailUrl = fetched.thumbnailUrl.ifBlank { target.albumItem.thumbnailUrl }
+                                    )
+                                }
+                                .onFailure { err ->
+                                    loadError = err.message ?: "Failed to load album"
+                                }
+                        } else if (loadError == null) {
                             fullAlbum = target.albumItem
                         }
+                    } finally {
                         isLoading = false
                     }
                 } else {
@@ -124,24 +134,34 @@ fun DetailScreen(
             is DetailTarget.Artist -> {
                 if (target.artistItem.topSongs.isEmpty()) {
                     isLoading = true
-                    coroutineScope.launch {
+                    try {
                         var browseId = target.artistItem.browseId
                         if (browseId.isBlank() && target.artistItem.name.isNotBlank()) {
-                            musicRepo.search(target.artistItem.name, "artists").onSuccess { sRes ->
-                                browseId = sRes.artists.firstOrNull()?.browseId.orEmpty()
-                            }
+                            musicRepo.search(target.artistItem.name, "artists")
+                                .onSuccess { sRes ->
+                                    browseId = sRes.artists.firstOrNull()?.browseId.orEmpty()
+                                }
+                                .onFailure { err ->
+                                    loadError = err.message ?: "Failed to load artist"
+                                }
                         }
                         if (browseId.isNotBlank()) {
-                            musicRepo.getArtist(browseId).onSuccess { fetched ->
-                                fullArtist = if (fetched.thumbnailUrl.isBlank()) {
-                                    fetched.copy(thumbnailUrl = target.artistItem.thumbnailUrl)
-                                } else {
-                                    fetched
+                            loadError = null
+                            musicRepo.getArtist(browseId)
+                                .onSuccess { fetched ->
+                                    fullArtist = if (fetched.thumbnailUrl.isBlank()) {
+                                        fetched.copy(thumbnailUrl = target.artistItem.thumbnailUrl)
+                                    } else {
+                                        fetched
+                                    }
                                 }
-                            }
-                        } else {
+                                .onFailure { err ->
+                                    loadError = err.message ?: "Failed to load artist"
+                                }
+                        } else if (loadError == null) {
                             fullArtist = target.artistItem
                         }
+                    } finally {
                         isLoading = false
                     }
                 } else {
@@ -151,9 +171,18 @@ fun DetailScreen(
             is DetailTarget.Playlist -> {
                 if (target.playlistItem.tracks.isEmpty() && target.playlistItem.playlistId.isNotBlank()) {
                     isLoading = true
-                    coroutineScope.launch {
-                        val res = musicRepo.getPlaylist(target.playlistItem.playlistId)
-                        res.onSuccess { fullPlaylist = it }
+                    try {
+                        musicRepo.getPlaylist(target.playlistItem.playlistId)
+                            .onSuccess { fetched ->
+                                fullPlaylist = fetched.copy(
+                                    author = fetched.author.ifBlank { target.playlistItem.author },
+                                    thumbnailUrl = fetched.thumbnailUrl.ifBlank { target.playlistItem.thumbnailUrl }
+                                )
+                            }
+                            .onFailure { err ->
+                                loadError = err.message ?: "Failed to load playlist"
+                            }
+                    } finally {
                         isLoading = false
                     }
                 } else {
@@ -177,25 +206,11 @@ fun DetailScreen(
             is DetailTarget.Artist -> {
                 val artist = fullArtist ?: target.artistItem
                 ArtistDetailContent(
+                    target = target,
                     artist = artist,
                     isLoading = isLoading,
-                    currentPlayingTrack = currentPlayingTrack,
-                    isPlaying = isPlaying,
-                    listState = listState,
-                    isCollapsed = isCollapsed,
-                    playbackController = playbackController,
-                    onBackClick = onBackClick,
-                    onSongOptionsClick = onSongOptionsClick,
-                    onAlbumClick = onAlbumClick,
-                    bottomContentPadding = bottomContentPadding
-                )
-            }
-            else -> {
-                StandardDetailContent(
-                    target = target,
-                    fullAlbum = fullAlbum,
-                    fullPlaylist = fullPlaylist,
-                    isLoading = isLoading,
+                    loadError = loadError,
+                    onRetry = { retryTrigger++ },
                     libraryState = libraryState,
                     libraryRepo = libraryRepo,
                     currentPlayingTrack = currentPlayingTrack,
@@ -205,6 +220,31 @@ fun DetailScreen(
                     playbackController = playbackController,
                     onBackClick = onBackClick,
                     onSongOptionsClick = onSongOptionsClick,
+                    onAlbumClick = onAlbumClick,
+                    onAlbumLongClick = onAlbumLongClick,
+                    onItemOptionsClick = onItemOptionsClick,
+                    bottomContentPadding = bottomContentPadding
+                )
+            }
+            else -> {
+                StandardDetailContent(
+                    target = target,
+                    fullAlbum = fullAlbum,
+                    fullPlaylist = fullPlaylist,
+                    isLoading = isLoading,
+                    loadError = loadError,
+                    onRetry = { retryTrigger++ },
+                    libraryState = libraryState,
+                    libraryRepo = libraryRepo,
+                    currentPlayingTrack = currentPlayingTrack,
+                    isPlaying = isPlaying,
+                    listState = listState,
+                    isCollapsed = isCollapsed,
+                    playbackController = playbackController,
+                    onBackClick = onBackClick,
+                    onSongOptionsClick = onSongOptionsClick,
+                    onPlaylistSongOptionsClick = onPlaylistSongOptionsClick,
+                    onItemOptionsClick = onItemOptionsClick,
                     onArtistClick = onArtistClick,
                     onBrowseHomeClick = onBrowseHomeClick,
                     coverArtworkModifier = coverArtworkModifier,
@@ -217,19 +257,33 @@ fun DetailScreen(
 
 @Composable
 private fun ArtistDetailContent(
+    target: DetailTarget.Artist,
     artist: ArtistItem,
     isLoading: Boolean,
+    loadError: String?,
+    onRetry: () -> Unit,
+    libraryState: LibraryState,
+    libraryRepo: LibraryRepository,
     currentPlayingTrack: SongItem?,
     isPlaying: Boolean,
-    listState: androidx.compose.foundation.lazy.LazyListState,
+    listState: LazyListState,
     isCollapsed: Boolean,
     playbackController: PlaybackController,
     onBackClick: () -> Unit,
     onSongOptionsClick: (SongItem) -> Unit,
     onAlbumClick: (AlbumItem) -> Unit,
+    onAlbumLongClick: ((AlbumItem) -> Unit)?,
+    onItemOptionsClick: ((ContextMenuItem) -> Unit)?,
     bottomContentPadding: Dp
 ) {
-    var isFollowing by remember { mutableStateOf(false) }
+    val isFollowing = remember(libraryState, artist.browseId, artist.name) {
+        libraryRepo.isArtistFollowed(artist.browseId, artist.name)
+    }
+    var showAllTopSongs by remember(target) { mutableStateOf(false) }
+    val artistReleases = remember(artist) {
+        artist.albums.map { it.copy(artist = artist.name) } +
+            artist.singles.map { it.copy(itemType = "single", artist = artist.name) }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -306,7 +360,7 @@ private fun ArtistDetailContent(
                             contentDescription = "More",
                             containerColor = Color.Black.copy(alpha = 0.36f),
                             tint = Color.White,
-                            onClick = {}
+                            onClick = { onItemOptionsClick?.invoke(ContextMenuItem.Artist(artist)) }
                         )
                     }
 
@@ -339,33 +393,40 @@ private fun ArtistDetailContent(
                         .padding(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    AuriclePrimaryButton(
-                        text = "Play",
-                        icon = AuricleIcons.Play,
-                        modifier = Modifier.weight(1f),
-                        height = 44.dp,
-                        onClick = {
-                            if (artist.topSongs.isNotEmpty()) {
+                    if (artist.topSongs.isNotEmpty() && loadError == null) {
+                        AuriclePrimaryButton(
+                            text = "Play",
+                            icon = AuricleIcons.Play,
+                            modifier = Modifier.weight(1f),
+                            height = 44.dp,
+                            onClick = {
                                 playbackController.playTrack(artist.topSongs.first(), artist.topSongs, artist.name)
                             }
-                        }
-                    )
-                    AuricleSecondaryButton(
-                        text = "Shuffle",
-                        icon = AuricleIcons.Shuffle,
-                        modifier = Modifier.weight(1f),
-                        height = 44.dp,
-                        onClick = {
-                            if (artist.topSongs.isNotEmpty()) {
+                        )
+                        AuricleSecondaryButton(
+                            text = "Shuffle",
+                            icon = AuricleIcons.Shuffle,
+                            modifier = Modifier.weight(1f),
+                            height = 44.dp,
+                            onClick = {
                                 playbackController.playTracksShuffled(artist.topSongs, artist.name)
                             }
-                        }
-                    )
+                        )
+                    }
                     AuricleOutlineButton(
                         text = if (isFollowing) "Following" else "Follow",
                         icon = if (isFollowing) AuricleIcons.Check else AuricleIcons.Plus,
                         height = 44.dp,
-                        onClick = { isFollowing = !isFollowing }
+                        onClick = {
+                            libraryRepo.toggleFollowArtist(
+                                ArtistItem(
+                                    browseId = artist.browseId,
+                                    name = artist.name,
+                                    subscribers = artist.subscribers,
+                                    thumbnailUrl = artist.thumbnailUrl
+                                )
+                            )
+                        }
                     )
                 }
             }
@@ -374,9 +435,27 @@ private fun ArtistDetailContent(
                 item {
                     FeedLoadingSkeleton(modifier = Modifier.fillMaxWidth())
                 }
+            } else if (loadError != null) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AuricleStateCard(
+                            icon = AuricleIcons.Refresh,
+                            title = "Couldn't load artist",
+                            subtitle = loadError,
+                            actionLabel = "Retry",
+                            onActionClick = onRetry
+                        )
+                    }
+                }
             } else {
                 // Top Songs Section
                 if (artist.topSongs.isNotEmpty()) {
+                    val displayedSongs = if (showAllTopSongs) artist.topSongs else artist.topSongs.take(5)
                     item {
                         Column {
                             AuricleSectionHeader(
@@ -384,7 +463,7 @@ private fun ArtistDetailContent(
                                 showChevron = false,
                                 modifier = Modifier.padding(horizontal = 20.dp)
                             )
-                            artist.topSongs.take(5).forEachIndexed { idx, song ->
+                            displayedSongs.forEachIndexed { idx, song ->
                                 SongRow(
                                     song = song,
                                     isPlaying = currentPlayingTrack?.videoId == song.videoId,
@@ -398,15 +477,26 @@ private fun ArtistDetailContent(
                                     onOptionsClick = {
                                         onSongOptionsClick(song)
                                     },
-                                    showDivider = idx < artist.topSongs.take(5).lastIndex
+                                    showDivider = idx < displayedSongs.lastIndex
                                 )
+                            }
+                            if (artist.topSongs.size > 5) {
+                                TextButton(
+                                    onClick = { showAllTopSongs = !showAllTopSongs },
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = if (showAllTopSongs) "Show less" else "Show all (${artist.topSongs.size})",
+                                        style = AuricleTheme.typography.subSB,
+                                        color = AuricleTheme.colors.accentStrong
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
                 // Albums & Singles Section
-                val artistReleases = artist.albums + artist.singles
                 if (artistReleases.isNotEmpty()) {
                     item {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -419,12 +509,18 @@ private fun ArtistDetailContent(
                                 contentPadding = PaddingValues(horizontal = 20.dp),
                                 horizontalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                items(artistReleases) { alb ->
+                                itemsIndexed(
+                                    items = artistReleases,
+                                    key = { idx, item -> "artist-rel-${item.browseId.ifBlank { item.title }}-$idx" }
+                                ) { _, alb ->
+                                    val typeLabel = alb.itemType.ifBlank { "album" }
+                                        .replaceFirstChar { it.uppercase() }
                                     AlbumCard(
                                         title = alb.title,
-                                        subtitle = if (alb.year.isNotBlank()) "Album · ${alb.year}" else "Album",
+                                        subtitle = if (alb.year.isNotBlank()) "$typeLabel · ${alb.year}" else typeLabel,
                                         artworkUrl = alb.thumbnailUrl,
                                         onClick = { onAlbumClick(alb) },
+                                        onLongClick = onAlbumLongClick?.let { cb -> { cb(alb) } },
                                         width = 160.dp
                                     )
                                 }
@@ -444,12 +540,11 @@ private fun ArtistDetailContent(
             AuricleCollapsedTopBar(
                 title = artist.name,
                 visible = isCollapsed,
-                actions = {
+                navigationIcon = {
                     AuricleCircleIconButton(
                         icon = AuricleIcons.ChevronLeft,
                         contentDescription = "Back",
-                        onClick = onBackClick,
-                        modifier = Modifier.testTag("DetailBack")
+                        onClick = onBackClick
                     )
                 }
             )
@@ -463,29 +558,41 @@ private fun StandardDetailContent(
     fullAlbum: AlbumItem?,
     fullPlaylist: PlaylistItem?,
     isLoading: Boolean,
+    loadError: String?,
+    onRetry: () -> Unit,
     libraryState: LibraryState,
     libraryRepo: LibraryRepository,
     currentPlayingTrack: SongItem?,
     isPlaying: Boolean,
-    listState: androidx.compose.foundation.lazy.LazyListState,
+    listState: LazyListState,
     isCollapsed: Boolean,
     playbackController: PlaybackController,
     onBackClick: () -> Unit,
     onSongOptionsClick: (SongItem) -> Unit,
+    onPlaylistSongOptionsClick: ((SongItem, UserPlaylist) -> Unit)?,
+    onItemOptionsClick: ((ContextMenuItem) -> Unit)?,
     onArtistClick: (ArtistItem) -> Unit,
     onBrowseHomeClick: () -> Unit,
     coverArtworkModifier: @Composable (String) -> Modifier,
     bottomContentPadding: Dp
 ) {
     val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    var glowColor by remember { mutableStateOf<Color?>(null) }
+    var glowColor by remember(target) { mutableStateOf<Color?>(null) }
 
-    var showRenameDialog by remember { mutableStateOf(false) }
-    var renameText by remember { mutableStateOf("") }
-    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showRenameDialog by remember(target) { mutableStateOf(false) }
+    var renameText by remember(target) { mutableStateOf("") }
+    var showDeleteConfirm by remember(target) { mutableStateOf(false) }
+    var showClearHistoryConfirm by remember(target) { mutableStateOf(false) }
 
-    val cfg = remember(target, fullAlbum, fullPlaylist, libraryState) {
+    val currentCustomPlaylist = remember(target, libraryState) {
+        if (target is DetailTarget.CustomUserPlaylist) {
+            libraryState.playlists.find { it.id == target.playlistId } ?: target.fallbackPlaylist
+        } else {
+            null
+        }
+    }
+
+    val cfg = remember(target, fullAlbum, fullPlaylist, libraryState, currentCustomPlaylist) {
         when (target) {
             is DetailTarget.Album -> {
                 val alb = fullAlbum ?: target.albumItem
@@ -512,11 +619,12 @@ private fun StandardDetailContent(
                 )
             }
             is DetailTarget.CustomUserPlaylist -> {
-                val pl = libraryState.playlists.find { it.id == target.playlistId } ?: target.fallbackPlaylist
+                val pl = currentCustomPlaylist ?: target.fallbackPlaylist
+                val countLabel = if (pl.tracks.size == 1) "1 song" else "${pl.tracks.size} songs"
                 DetailConfig(
                     title = pl.name,
                     subtitle = "Custom Playlist",
-                    yearOrCount = "${pl.tracks.size} songs",
+                    yearOrCount = countLabel,
                     artworkUrl = pl.tracks.firstOrNull()?.displayArtworkUrl ?: "",
                     tracks = pl.tracks,
                     isAlbum = false,
@@ -525,10 +633,11 @@ private fun StandardDetailContent(
                 )
             }
             DetailTarget.LikedSongs -> {
+                val countLabel = if (libraryState.likedSongs.size == 1) "1 song" else "${libraryState.likedSongs.size} songs"
                 DetailConfig(
                     title = "Liked Songs",
                     subtitle = "Auto Playlist",
-                    yearOrCount = "${libraryState.likedSongs.size} songs",
+                    yearOrCount = countLabel,
                     artworkUrl = "",
                     tracks = libraryState.likedSongs,
                     isAlbum = false,
@@ -538,10 +647,11 @@ private fun StandardDetailContent(
             }
             DetailTarget.RecentlyPlayed -> {
                 val recentSongs = libraryState.recentlyPlayed.map { it.track }
+                val countLabel = if (recentSongs.size == 1) "1 song" else "${recentSongs.size} songs"
                 DetailConfig(
                     title = "Recently Played",
                     subtitle = "Playback History",
-                    yearOrCount = "${recentSongs.size} songs",
+                    yearOrCount = countLabel,
                     artworkUrl = recentSongs.firstOrNull()?.displayArtworkUrl ?: "",
                     tracks = recentSongs,
                     isAlbum = false,
@@ -561,30 +671,37 @@ private fun StandardDetailContent(
     val coverKey = cfg.coverKey
     val customPlaylistId = cfg.customPlaylistId
 
-    // Glow color extraction
-    LaunchedEffect(artworkUrl) {
-        if (artworkUrl.isNotBlank()) {
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val loader = ImageLoader(context)
-                    val req = ImageRequest.Builder(context)
-                        .data(artworkUrl)
-                        .allowHardware(false)
-                        .size(150)
-                        .build()
-                    val res = loader.execute(req)
-                    if (res is SuccessResult) {
-                        val bitmap = res.drawable.toBitmap()
-                        val palette = Palette.from(bitmap).generate()
-                        val swatch = palette.vibrantSwatch ?: palette.dominantSwatch ?: palette.mutedSwatch
-                        if (swatch != null) {
-                            glowColor = Color(swatch.rgb)
-                        }
-                    }
-                } catch (e: Exception) {
-                    // ignore
+    // Glow color extraction (structured within LaunchedEffect so target change cancels previous work)
+    LaunchedEffect(target, artworkUrl) {
+        if (artworkUrl.isBlank()) {
+            glowColor = null
+            return@LaunchedEffect
+        }
+        val extracted = withContext(Dispatchers.IO) {
+            try {
+                val loader = context.imageLoader
+                val req = ImageRequest.Builder(context)
+                    .data(artworkUrl)
+                    .allowHardware(false)
+                    .size(150)
+                    .build()
+                val res = loader.execute(req)
+                if (res is SuccessResult) {
+                    val bitmap = res.drawable.toBitmap()
+                    val palette = Palette.from(bitmap).generate()
+                    val swatch = palette.vibrantSwatch ?: palette.dominantSwatch ?: palette.mutedSwatch
+                    swatch?.let { Color(it.rgb) }
+                } else {
+                    null
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
             }
+        }
+        if (extracted != null) {
+            glowColor = extracted
         }
     }
 
@@ -648,6 +765,28 @@ private fun StandardDetailContent(
         )
     }
 
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            title = { Text("Clear Recently Played", style = AuricleTheme.typography.title2, color = AuricleTheme.colors.textPrimary) },
+            text = { Text("Remove all songs from your playback history?", style = AuricleTheme.typography.body, color = AuricleTheme.colors.textMuted) },
+            confirmButton = {
+                TextButton(onClick = {
+                    libraryRepo.clearHistory()
+                    showClearHistoryConfirm = false
+                }) {
+                    Text("Clear", color = AuricleTheme.colors.danger, style = AuricleTheme.typography.calloutSB)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) {
+                    Text("Cancel", color = AuricleTheme.colors.textMuted)
+                }
+            },
+            containerColor = AuricleTheme.colors.surface2
+        )
+    }
+
     val glowAlpha = if (AuricleTheme.colors.isDark) 0.45f else 0.25f
     val resolvedGlow = glowColor ?: AuricleTheme.colors.accentStrong
 
@@ -695,32 +834,84 @@ private fun StandardDetailContent(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (customPlaylistId != null) {
-                            AuricleCircleIconButton(
-                                icon = AuricleIcons.Edit,
-                                contentDescription = "Rename Playlist",
-                                onClick = {
-                                    renameText = title
-                                    showRenameDialog = true
+                        when (target) {
+                            is DetailTarget.CustomUserPlaylist -> {
+                                val playlist = currentCustomPlaylist ?: target.fallbackPlaylist
+                                AuricleCircleIconButton(
+                                    icon = AuricleIcons.Edit,
+                                    contentDescription = "Rename Playlist",
+                                    onClick = {
+                                        renameText = title
+                                        showRenameDialog = true
+                                    }
+                                )
+                                AuricleCircleIconButton(
+                                    icon = AuricleIcons.Trash,
+                                    contentDescription = "Delete Playlist",
+                                    tint = AuricleTheme.colors.danger,
+                                    onClick = { showDeleteConfirm = true }
+                                )
+                                AuricleCircleIconButton(
+                                    icon = AuricleIcons.More,
+                                    contentDescription = "More",
+                                    onClick = { onItemOptionsClick?.invoke(ContextMenuItem.LocalPlaylist(playlist)) }
+                                )
+                            }
+                            is DetailTarget.Album -> {
+                                val currentAlbum = fullAlbum ?: target.albumItem
+                                val isSaved = remember(libraryState, currentAlbum.browseId, currentAlbum.title, currentAlbum.artist) {
+                                    libraryRepo.isAlbumSaved(currentAlbum.browseId, currentAlbum.title, currentAlbum.artist)
                                 }
-                            )
-                            AuricleCircleIconButton(
-                                icon = AuricleIcons.Trash,
-                                contentDescription = "Delete Playlist",
-                                tint = AuricleTheme.colors.danger,
-                                onClick = { showDeleteConfirm = true }
-                            )
-                        } else {
-                            AuricleCircleIconButton(
-                                icon = AuricleIcons.Heart,
-                                contentDescription = "Like",
-                                onClick = {}
-                            )
-                            AuricleCircleIconButton(
-                                icon = AuricleIcons.More,
-                                contentDescription = "More",
-                                onClick = {}
-                            )
+                                AuricleCircleIconButton(
+                                    icon = if (isSaved) AuricleIcons.HeartFill else AuricleIcons.Heart,
+                                    contentDescription = if (isSaved) "Remove album from library" else "Save album",
+                                    tint = if (isSaved) AuricleTheme.colors.accent else AuricleTheme.colors.textPrimary,
+                                    onClick = { libraryRepo.toggleSaveAlbum(currentAlbum) }
+                                )
+                                AuricleCircleIconButton(
+                                    icon = AuricleIcons.More,
+                                    contentDescription = "More",
+                                    onClick = { onItemOptionsClick?.invoke(ContextMenuItem.Album(currentAlbum)) }
+                                )
+                            }
+                            is DetailTarget.Playlist -> {
+                                val currentPlaylist = fullPlaylist ?: target.playlistItem
+                                val isSaved = remember(libraryState, currentPlaylist.playlistId, currentPlaylist.title) {
+                                    libraryRepo.isPlaylistSaved(currentPlaylist.playlistId, currentPlaylist.title)
+                                }
+                                AuricleCircleIconButton(
+                                    icon = if (isSaved) AuricleIcons.HeartFill else AuricleIcons.Heart,
+                                    contentDescription = if (isSaved) "Remove playlist from library" else "Save playlist",
+                                    tint = if (isSaved) AuricleTheme.colors.accent else AuricleTheme.colors.textPrimary,
+                                    onClick = { libraryRepo.toggleSavePlaylist(currentPlaylist) }
+                                )
+                                AuricleCircleIconButton(
+                                    icon = AuricleIcons.More,
+                                    contentDescription = "More",
+                                    onClick = { onItemOptionsClick?.invoke(ContextMenuItem.RemotePlaylist(currentPlaylist)) }
+                                )
+                            }
+                            DetailTarget.RecentlyPlayed -> {
+                                if (tracks.isNotEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .height(36.dp)
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(AuricleTheme.colors.fillMed)
+                                            .auriclePressClickable { showClearHistoryConfirm = true }
+                                            .padding(horizontal = 14.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Clear",
+                                            style = AuricleTheme.typography.subSB,
+                                            color = AuricleTheme.colors.danger
+                                        )
+                                    }
+                                }
+                            }
+                            DetailTarget.LikedSongs,
+                            is DetailTarget.Artist -> Unit
                         }
                     }
                 }
@@ -796,6 +987,12 @@ private fun StandardDetailContent(
 
             // Metadata: Title, Artist, Year/Count
             item {
+                val clickableArtistName = if (target is DetailTarget.Album) {
+                    (fullAlbum?.artist?.takeIf { it.isNotBlank() } ?: target.albumItem.artist)
+                        .takeIf { it.isNotBlank() }
+                } else {
+                    null
+                }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -806,18 +1003,20 @@ private fun StandardDetailContent(
                         text = title,
                         style = AuricleTheme.typography.title1,
                         color = AuricleTheme.colors.textPrimary,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        textAlign = TextAlign.Center
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = subtitle,
                         style = AuricleTheme.typography.headline,
-                        color = AuricleTheme.colors.accentStrong,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier.clickable {
-                            if (target is DetailTarget.Album && fullAlbum?.artist != null) {
-                                onArtistClick(ArtistItem(name = fullAlbum!!.artist, browseId = "", thumbnailUrl = ""))
+                        color = if (clickableArtistName != null) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textMuted,
+                        textAlign = TextAlign.Center,
+                        modifier = if (clickableArtistName != null) {
+                            Modifier.clickable {
+                                onArtistClick(ArtistItem(name = clickableArtistName, browseId = "", thumbnailUrl = ""))
                             }
+                        } else {
+                            Modifier
                         }
                     )
                     Spacer(Modifier.height(2.dp))
@@ -825,13 +1024,13 @@ private fun StandardDetailContent(
                         text = yearOrCount,
                         style = AuricleTheme.typography.sub,
                         color = AuricleTheme.colors.textMuted,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        textAlign = TextAlign.Center
                     )
                 }
             }
 
             // Play & Shuffle Action Buttons
-            if (tracks.isNotEmpty()) {
+            if (tracks.isNotEmpty() && loadError == null) {
                 item {
                     Row(
                         modifier = Modifier
@@ -861,10 +1060,27 @@ private fun StandardDetailContent(
                 }
             }
 
-            // Loading state
+            // Loading / Error / Empty / Tracks state
             if (isLoading) {
                 item {
                     FeedLoadingSkeleton(modifier = Modifier.fillMaxWidth())
+                }
+            } else if (loadError != null) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AuricleStateCard(
+                            icon = AuricleIcons.Refresh,
+                            title = "Couldn't load",
+                            subtitle = loadError,
+                            actionLabel = "Retry",
+                            onActionClick = onRetry
+                        )
+                    }
                 }
             } else if (tracks.isEmpty()) {
                 item {
@@ -886,7 +1102,10 @@ private fun StandardDetailContent(
             } else {
                 // Numbered Track Rows (for Album) or Song Rows (for Playlists)
                 if (isAlbumType) {
-                    itemsIndexed(tracks) { idx, song ->
+                    itemsIndexed(
+                        items = tracks,
+                        key = { idx, song -> "album-track-${song.videoId.ifBlank { song.title }}-$idx" }
+                    ) { idx, song ->
                         TrackRow(
                             index = idx + 1,
                             song = song,
@@ -898,14 +1117,24 @@ private fun StandardDetailContent(
                         )
                     }
                 } else {
-                    itemsIndexed(tracks) { idx, song ->
+                    itemsIndexed(
+                        items = tracks,
+                        key = { idx, song -> "detail-song-${song.videoId.ifBlank { song.title }}-$idx" }
+                    ) { idx, song ->
                         SongRow(
                             song = song,
                             isPlaying = currentPlayingTrack?.videoId == song.videoId,
                             isActivelyPlaying = isPlaying,
                             onClick = { playbackController.playTrack(song, tracks, title) },
                             onQuickAddQueue = { playbackController.addToQueue(song) },
-                            onOptionsClick = { onSongOptionsClick(song) },
+                            onOptionsClick = {
+                                if (currentCustomPlaylist != null) {
+                                    onPlaylistSongOptionsClick?.invoke(song, currentCustomPlaylist)
+                                        ?: onSongOptionsClick(song)
+                                } else {
+                                    onSongOptionsClick(song)
+                                }
+                            },
                             showDivider = idx < tracks.lastIndex
                         )
                     }
@@ -914,7 +1143,7 @@ private fun StandardDetailContent(
                 // Footer track count
                 item {
                     Text(
-                        text = "${tracks.size} songs",
+                        text = if (tracks.size == 1) "1 song" else "${tracks.size} songs",
                         style = AuricleTheme.typography.sub,
                         color = AuricleTheme.colors.textMuted,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
@@ -932,12 +1161,11 @@ private fun StandardDetailContent(
             AuricleCollapsedTopBar(
                 title = title,
                 visible = isCollapsed,
-                actions = {
+                navigationIcon = {
                     AuricleCircleIconButton(
                         icon = AuricleIcons.ChevronLeft,
                         contentDescription = "Back",
-                        onClick = onBackClick,
-                        modifier = Modifier.testTag("DetailBack")
+                        onClick = onBackClick
                     )
                 }
             )

@@ -6,7 +6,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,11 +17,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.auricle.app.ui.theme.AuricleTheme
 
 @Composable
@@ -39,7 +36,7 @@ fun AccentPillButton(
             shape = RoundedCornerShape(22.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = AuricleTheme.colors.accent,
-                contentColor = Color.White
+                contentColor = AuricleTheme.colors.onAccent
             ),
             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
             content = content
@@ -71,13 +68,14 @@ fun AuriclePrimaryButton(
     enabled: Boolean = true
 ) {
     val style = if (height >= 48.dp) AuricleTheme.typography.headline else AuricleTheme.typography.calloutSB
+    val shape = RoundedCornerShape(cornerRadius)
     Row(
         modifier = modifier
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
-            .auriclePressClickable(enabled = enabled, onClick = onClick)
-            .clip(RoundedCornerShape(cornerRadius))
+            .clip(shape)
             .background(AuricleTheme.colors.primaryFill)
+            .auriclePressClickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -100,13 +98,14 @@ fun AuricleSecondaryButton(
     cornerRadius: Dp = 14.dp,
     enabled: Boolean = true
 ) {
+    val shape = RoundedCornerShape(cornerRadius)
     Row(
         modifier = modifier
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
-            .auriclePressClickable(enabled = enabled, onClick = onClick)
-            .clip(RoundedCornerShape(cornerRadius))
+            .clip(shape)
             .background(AuricleTheme.colors.fillMed)
+            .auriclePressClickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -129,13 +128,14 @@ fun AuricleOutlineButton(
     cornerRadius: Dp = 14.dp,
     enabled: Boolean = true
 ) {
+    val shape = RoundedCornerShape(cornerRadius)
     Row(
         modifier = modifier
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
+            .clip(shape)
+            .border(1.dp, AuricleTheme.colors.border, shape)
             .auriclePressClickable(enabled = enabled, onClick = onClick)
-            .clip(RoundedCornerShape(cornerRadius))
-            .border(1.dp, AuricleTheme.colors.border, RoundedCornerShape(cornerRadius))
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -159,13 +159,14 @@ fun AuricleDestructiveButton(
     enabled: Boolean = true
 ) {
     val alpha = if (AuricleTheme.colors.isDark) 0.12f else 0.10f
+    val shape = RoundedCornerShape(cornerRadius)
     Row(
         modifier = modifier
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
-            .auriclePressClickable(enabled = enabled, onClick = onClick)
-            .clip(RoundedCornerShape(cornerRadius))
+            .clip(shape)
             .background(AuricleTheme.colors.danger.copy(alpha = alpha))
+            .auriclePressClickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -194,12 +195,12 @@ fun AuricleCircleIconButton(
         modifier = modifier
             .minimumInteractiveComponentSize()
             .size(size)
+            .clip(CircleShape)
+            .background(containerColor)
             .auriclePressClickable(
                 onClick = onClick,
-                hapticType = if (haptic) androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove else null
-            )
-            .clip(CircleShape)
-            .background(containerColor),
+                hapticType = if (haptic) HapticFeedbackType.TextHandleMove else null
+            ),
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(iconSize), tint = tint)
@@ -215,13 +216,14 @@ fun AuricleFilterChip(
 ) {
     val bg = if (selected) AuricleTheme.colors.primaryFill else AuricleTheme.colors.fillSoft
     val textC = if (selected) AuricleTheme.colors.onPrimaryFill else AuricleTheme.colors.textPrimary
+    val shape = RoundedCornerShape(17.dp)
     Row(
         modifier = modifier
             .height(34.dp)
-            .auriclePressClickable(onClick = onClick)
-            .clip(RoundedCornerShape(17.dp))
+            .clip(shape)
             .background(bg)
-            .then(if (!selected) Modifier.border(1.dp, AuricleTheme.colors.border, RoundedCornerShape(17.dp)) else Modifier)
+            .then(if (!selected) Modifier.border(1.dp, AuricleTheme.colors.border, shape) else Modifier)
+            .auriclePressClickable(onClick = onClick)
             .padding(horizontal = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center

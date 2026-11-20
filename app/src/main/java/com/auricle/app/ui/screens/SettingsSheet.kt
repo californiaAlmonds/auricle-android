@@ -1,5 +1,6 @@
 package com.auricle.app.ui.screens
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -25,11 +26,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.auricle.app.BuildConfig
+import com.auricle.app.bridge.AuricleNative
 import com.auricle.app.data.SettingsRepository
 import com.auricle.app.model.AccentColorPreset
 import com.auricle.app.model.ThemeMode
@@ -72,23 +76,21 @@ fun SettingsSheet(
         "Calculating…"
     } else {
         val mb = cacheSizeBytes / (1024.0 * 1024.0)
-        String.format(Locale.US, "%.1f MB of temporary audio", mb)
+        String.format(Locale.US, "%.1f MB of cached images & stream URLs", mb)
     }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(AuricleTheme.colors.sheetBg)
-            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(start = 20.dp, top = 4.dp, end = 20.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
-        // Header
+        // Pinned Header
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
+                .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp)
         ) {
             Text(
                 text = "Settings",
@@ -112,6 +114,14 @@ fun SettingsSheet(
             }
         }
 
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, top = 4.dp, end = 20.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+
         // 1. APPEARANCE Group
         SettingsGroupCard(title = "APPEARANCE") {
             // Theme Mode
@@ -128,6 +138,8 @@ fun SettingsSheet(
                     text = "Theme",
                     style = AuricleTheme.typography.bodyM,
                     color = AuricleTheme.colors.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
                 AuricleSegmentedControl(
@@ -141,7 +153,7 @@ fun SettingsSheet(
                         val selected = listOf(ThemeMode.SYSTEM, ThemeMode.DARK, ThemeMode.LIGHT)[idx]
                         settingsRepo.updateThemeMode(selected)
                     },
-                    modifier = Modifier.width(180.dp)
+                    modifier = Modifier.widthIn(min = 160.dp, max = 210.dp)
                 )
             }
 
@@ -183,9 +195,14 @@ fun SettingsSheet(
                         val color = Color(preset.hex)
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
-                                .semantics { contentDescription = preset.displayName }
-                                .auriclePressClickable { settingsRepo.updateAccentPreset(preset) },
+                                .semantics {
+                                    contentDescription = preset.displayName
+                                    selected = isSelected
+                                }
+                                .clip(CircleShape)
+                                .auriclePressClickable { settingsRepo.updateAccentPreset(preset) }
+                                .minimumInteractiveComponentSize()
+                                .size(36.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             if (isSelected) {
@@ -250,37 +267,6 @@ fun SettingsSheet(
 
         // 2. PLAYBACK Group
         SettingsGroupCard(title = "PLAYBACK") {
-            // Autoplay
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 72.dp)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                SettingsIconBadge(AuricleIcons.Infinity, Color(0xFF3FA96A))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Autoplay",
-                        style = AuricleTheme.typography.bodyM,
-                        color = AuricleTheme.colors.textPrimary
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "Keep playing similar songs when the queue ends",
-                        style = AuricleTheme.typography.sub,
-                        color = AuricleTheme.colors.textMuted
-                    )
-                }
-                AuricleSwitch(
-                    checked = settings.autoplay,
-                    onCheckedChange = { settingsRepo.updateAutoplay(it) }
-                )
-            }
-
-            SettingsDivider()
-
             // High Quality Audio
             Row(
                 modifier = Modifier
@@ -338,12 +324,14 @@ fun SettingsSheet(
                 }
                 Box(
                     modifier = Modifier
-                        .height(32.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(AuricleTheme.colors.fillMed)
+                        .minimumInteractiveComponentSize()
+                        .clip(RoundedCornerShape(24.dp))
                         .auriclePressClickable {
                             scope.launch {
                                 withContext(Dispatchers.IO) {
+                                    if (AuricleNative.isNativeLoaded()) {
+                                        runCatching { AuricleNative.nativeClearStreamCache() }
+                                    }
                                     runCatching { File(context.filesDir, "url_cache.json").delete() }
                                     runCatching {
                                         context.cacheDir.listFiles()?.forEach { file ->
@@ -356,15 +344,23 @@ fun SettingsSheet(
                                 }
                                 Toast.makeText(context, "Stream cache cleared", Toast.LENGTH_SHORT).show()
                             }
-                        }
-                        .padding(horizontal = 14.dp),
+                        },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "Clear",
-                        style = AuricleTheme.typography.subSB.copy(fontSize = 13.sp),
-                        color = AuricleTheme.colors.textPrimary
-                    )
+                    Box(
+                        modifier = Modifier
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(AuricleTheme.colors.fillMed)
+                            .padding(horizontal = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Clear",
+                            style = AuricleTheme.typography.subSB.copy(fontSize = 13.sp),
+                            color = AuricleTheme.colors.textPrimary
+                        )
+                    }
                 }
             }
         }
@@ -402,7 +398,7 @@ fun SettingsSheet(
                         )
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            text = "You're on ${BuildConfig.VERSION_NAME}",
+                            text = "You're on v${BuildConfig.VERSION_NAME}",
                             style = AuricleTheme.typography.sub,
                             color = AuricleTheme.colors.textMuted
                         )
@@ -499,7 +495,10 @@ fun SettingsSheet(
                     .heightIn(min = 64.dp)
                     .auriclePressClickable {
                         val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/californiaAlmonds/auricle-android"))
-                        context.startActivity(intent)
+                        try {
+                            context.startActivity(intent)
+                        } catch (_: ActivityNotFoundException) {
+                        }
                     }
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -538,6 +537,7 @@ fun SettingsSheet(
                 .fillMaxWidth()
                 .padding(top = 4.dp)
         )
+        }
     }
 }
 
@@ -599,9 +599,14 @@ private fun calculateCacheBytes(context: Context): Long {
     runCatching {
         val urlCache = File(context.filesDir, "url_cache.json")
         if (urlCache.exists()) size += urlCache.length()
-        context.cacheDir.walkTopDown().forEach { file ->
-            if (file.isFile) size += file.length()
-        }
+        val updatesDir = File(context.cacheDir, "updates")
+        context.cacheDir.walkTopDown()
+            .onEnter { dir -> dir != updatesDir }
+            .forEach { file ->
+                if (file.isFile && !file.name.endsWith(".apk")) {
+                    size += file.length()
+                }
+            }
     }
     return size
 }

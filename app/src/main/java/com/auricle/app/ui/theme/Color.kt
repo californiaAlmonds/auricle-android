@@ -3,6 +3,7 @@ package com.auricle.app.ui.theme
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 // Brand Gradient Constants
 val BrandTeal = Color(0xFF2FD3A0)
@@ -85,16 +86,41 @@ data class AuricleColors(
     val isDark: Boolean
 )
 
+private fun onAccentFor(accent: Color): Color =
+    if (accent.luminance() > 0.55f) Color(0xFF111116) else Color.White
+
+private fun ensureMinLuminance(color: Color, minLuminance: Float): Color {
+    var c = color
+    var steps = 0
+    while (c.luminance() < minLuminance && steps < 12) {
+        c = brightenColor(c, 0.18f)
+        steps++
+    }
+    return c
+}
+
+private fun ensureMaxLuminance(color: Color, maxLuminance: Float): Color {
+    var c = color
+    var steps = 0
+    while (c.luminance() > maxLuminance && steps < 12) {
+        c = darkenColor(c, 0.16f)
+        steps++
+    }
+    return c
+}
+
 fun createDarkColors(accent: Color): AuricleColors {
     val bg = blendWithAccent(Color(0xFF0C1016), accent, 0.05f)
     val tabBarGlass = Color(0xD9141923)
     val miniPlayerGlass = Color(0xEB1E2532)
+    val readableAccent = ensureMinLuminance(accent, 0.24f)
+    val readableStrong = ensureMinLuminance(brightenColor(readableAccent, 0.22f), 0.34f)
 
     return AuricleColors(
-        accent = accent,
-        accentStrong = brightenColor(accent, 0.22f),
-        accentSoft = accent.copy(alpha = 0.16f),
-        onAccent = Color.White,
+        accent = readableAccent,
+        accentStrong = readableStrong,
+        accentSoft = readableAccent.copy(alpha = 0.16f),
+        onAccent = onAccentFor(readableAccent),
         bg = bg,
         canvas = bg,
         surface = blendWithAccent(Color(0xFF12161F), accent, 0.06f),
@@ -130,12 +156,14 @@ fun createLightColors(accent: Color): AuricleColors {
     val bg = blendWithAccent(Color(0xFFF7F8FA), accent, 0.03f)
     val tabBarGlass = Color(0xE0FFFFFF)
     val miniPlayerGlass = Color(0xEBFFFFFF)
+    val readableAccent = ensureMaxLuminance(accent, 0.36f)
+    val readableStrong = ensureMaxLuminance(darkenColor(readableAccent, 0.18f), 0.24f)
 
     return AuricleColors(
-        accent = accent,
-        accentStrong = darkenColor(accent, 0.18f),
-        accentSoft = accent.copy(alpha = 0.12f),
-        onAccent = Color.White,
+        accent = readableAccent,
+        accentStrong = readableStrong,
+        accentSoft = readableAccent.copy(alpha = 0.12f),
+        onAccent = onAccentFor(readableAccent),
         bg = bg,
         canvas = bg,
         surface = Color(0xFFFFFFFF),

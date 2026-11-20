@@ -1,5 +1,6 @@
 package com.auricle.app.ui.screens
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,12 +9,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -22,6 +26,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +48,8 @@ fun SongOptionBottomSheet(
     onDismiss: () -> Unit,
     onGoToAlbum: ((SongItem) -> Unit)? = null,
     onGoToArtist: ((SongItem) -> Unit)? = null,
+    playlistContextName: String? = null,
+    onRemoveFromPlaylist: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -58,6 +65,7 @@ fun SongOptionBottomSheet(
             .fillMaxWidth()
             .background(AuricleTheme.colors.sheetBg)
             .navigationBarsPadding()
+            .imePadding()
             .padding(start = 20.dp, top = 4.dp, end = 20.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -193,20 +201,33 @@ fun SongOptionBottomSheet(
                 }
 
                 // Share
+                val canShare = song.videoId.isNotBlank() || song.title.isNotBlank()
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .height(76.dp)
+                        .alpha(if (canShare) 1f else 0.45f)
                         .clip(RoundedCornerShape(14.dp))
                         .background(AuricleTheme.colors.fillMed)
                         .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(14.dp))
-                        .auriclePressClickable {
+                        .auriclePressClickable(enabled = canShare) {
+                            val headerText = listOf(song.title, song.artist)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" — ")
+                            val shareText = if (song.videoId.isNotBlank()) {
+                                "$headerText\nhttps://music.youtube.com/watch?v=${song.videoId}"
+                            } else {
+                                headerText
+                            }
                             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
-                                putExtra(Intent.EXTRA_SUBJECT, "${song.title} — ${song.artist}")
-                                putExtra(Intent.EXTRA_TEXT, "${song.title} — ${song.artist}\nhttps://music.youtube.com/watch?v=${song.videoId}")
+                                putExtra(Intent.EXTRA_SUBJECT, headerText)
+                                putExtra(Intent.EXTRA_TEXT, shareText)
                             }
-                            context.startActivity(Intent.createChooser(shareIntent, "Share Track"))
+                            try {
+                                context.startActivity(Intent.createChooser(shareIntent, "Share Track"))
+                            } catch (_: ActivityNotFoundException) {
+                            }
                             onDismiss()
                         },
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -227,7 +248,7 @@ fun SongOptionBottomSheet(
                 }
             }
 
-            // 4 Action Rows
+            // Action Rows
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -252,25 +273,43 @@ fun SongOptionBottomSheet(
                     onClick = { showPlaylistPicker = true }
                 )
 
+                // Optional: Remove from Playlist
+                if (onRemoveFromPlaylist != null) {
+                    SongActionRow(
+                        icon = AuricleIcons.Trash,
+                        label = "Remove from ${playlistContextName ?: "playlist"}",
+                        iconTint = AuricleTheme.colors.danger,
+                        labelColor = AuricleTheme.colors.danger,
+                        onClick = {
+                            onRemoveFromPlaylist()
+                            onDismiss()
+                        }
+                    )
+                }
+
                 // 3. Go to Album
-                SongActionRow(
-                    icon = AuricleIcons.Album,
-                    label = "Go to Album",
-                    onClick = {
-                        onGoToAlbum?.invoke(song)
-                        onDismiss()
-                    }
-                )
+                if (onGoToAlbum != null && (song.album.isNotBlank() || song.albumId.isNotBlank())) {
+                    SongActionRow(
+                        icon = AuricleIcons.Album,
+                        label = "Go to Album",
+                        onClick = {
+                            onGoToAlbum.invoke(song)
+                            onDismiss()
+                        }
+                    )
+                }
 
                 // 4. Go to Artist
-                SongActionRow(
-                    icon = AuricleIcons.Artist,
-                    label = "Go to Artist",
-                    onClick = {
-                        onGoToArtist?.invoke(song)
-                        onDismiss()
-                    }
-                )
+                if (onGoToArtist != null && (song.artist.isNotBlank() || song.artistId.isNotBlank())) {
+                    SongActionRow(
+                        icon = AuricleIcons.Artist,
+                        label = "Go to Artist",
+                        onClick = {
+                            onGoToArtist.invoke(song)
+                            onDismiss()
+                        }
+                    )
+                }
             }
         } else {
             // Playlist Picker View
@@ -302,6 +341,14 @@ fun SongOptionBottomSheet(
             }
 
             // Inline Create New Playlist Row
+            val createAndAdd: () -> Unit = {
+                if (newPlaylistName.isNotBlank()) {
+                    val created = libraryRepo.createPlaylist(newPlaylistName.trim())
+                    libraryRepo.addToPlaylist(created.id, song)
+                    onDismiss()
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -311,6 +358,8 @@ fun SongOptionBottomSheet(
                     value = newPlaylistName,
                     onValueChange = { newPlaylistName = it },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { createAndAdd() }),
                     textStyle = AuricleTheme.typography.body.copy(color = AuricleTheme.colors.textPrimary, fontSize = 14.sp),
                     cursorBrush = SolidColor(AuricleTheme.colors.accent),
                     decorationBox = { innerTextField ->
@@ -342,13 +391,7 @@ fun SongOptionBottomSheet(
                         .height(44.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (newPlaylistName.isNotBlank()) AuricleTheme.colors.primaryFill else AuricleTheme.colors.fillMed)
-                        .auriclePressClickable(enabled = newPlaylistName.isNotBlank()) {
-                            if (newPlaylistName.isNotBlank()) {
-                                val created = libraryRepo.createPlaylist(newPlaylistName.trim())
-                                libraryRepo.addToPlaylist(created.id, song)
-                                onDismiss()
-                            }
-                        }
+                        .auriclePressClickable(enabled = newPlaylistName.isNotBlank(), onClick = createAndAdd)
                         .padding(horizontal = 14.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -379,7 +422,9 @@ fun SongOptionBottomSheet(
                     modifier = Modifier.heightIn(max = 240.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(playlists) { playlist ->
+                    items(playlists, key = { it.id }) { playlist ->
+                        val isAlreadyAdded = song.videoId.isNotBlank() &&
+                            playlist.tracks.any { it.videoId == song.videoId }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -388,7 +433,9 @@ fun SongOptionBottomSheet(
                                 .background(AuricleTheme.colors.surface2)
                                 .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(12.dp))
                                 .auriclePressClickable {
-                                    libraryRepo.addToPlaylist(playlist.id, song)
+                                    if (!isAlreadyAdded) {
+                                        libraryRepo.addToPlaylist(playlist.id, song)
+                                    }
                                     onDismiss()
                                 }
                                 .padding(horizontal = 14.dp),
@@ -415,12 +462,35 @@ fun SongOptionBottomSheet(
                                     color = AuricleTheme.colors.textMuted
                                 )
                             }
-                            Icon(
-                                imageVector = AuricleIcons.Plus,
-                                contentDescription = null,
-                                tint = AuricleTheme.colors.textMuted,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            if (isAlreadyAdded) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(AuricleTheme.colors.accentSoft)
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = AuricleIcons.Check,
+                                        contentDescription = "Added",
+                                        tint = AuricleTheme.colors.accentStrong,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = "Added",
+                                        style = AuricleTheme.typography.captionSB,
+                                        color = AuricleTheme.colors.accentStrong
+                                    )
+                                }
+                            } else {
+                                Icon(
+                                    imageVector = AuricleIcons.Plus,
+                                    contentDescription = null,
+                                    tint = AuricleTheme.colors.textMuted,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -434,6 +504,7 @@ private fun SongActionRow(
     icon: ImageVector,
     label: String,
     iconTint: Color = AuricleTheme.colors.textPrimary,
+    labelColor: Color = AuricleTheme.colors.textPrimary,
     trailingIcon: ImageVector? = null,
     onClick: () -> Unit
 ) {
@@ -456,7 +527,7 @@ private fun SongActionRow(
         Text(
             text = label,
             style = AuricleTheme.typography.bodyM,
-            color = AuricleTheme.colors.textPrimary,
+            color = labelColor,
             modifier = Modifier.weight(1f)
         )
         if (trailingIcon != null) {

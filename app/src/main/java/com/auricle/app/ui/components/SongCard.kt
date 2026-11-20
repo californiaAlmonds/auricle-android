@@ -29,12 +29,13 @@ fun AlbumCard(
     onClick: () -> Unit,
     width: Dp = 160.dp,
     artworkModifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
             .width(width)
-            .auriclePressClickable(onClick = onClick)
+            .auriclePressClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)
@@ -72,6 +73,7 @@ fun AlbumCard(
 fun SongCard(
     song: SongItem,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     AlbumCard(
@@ -79,6 +81,7 @@ fun SongCard(
         subtitle = song.artist,
         artworkUrl = song.displayArtworkUrl,
         onClick = onClick,
+        onLongClick = onLongClick,
         modifier = modifier
     )
 }
@@ -89,12 +92,13 @@ fun ArtistCircleCard(
     artworkUrl: String,
     onClick: () -> Unit,
     size: Dp = 96.dp,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
             .width(size)
-            .auriclePressClickable(onClick = onClick),
+            .auriclePressClickable(onClick = onClick, onLongClick = onLongClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AsyncImage(

@@ -2,7 +2,6 @@ package com.auricle.app.ui.components
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -81,7 +80,11 @@ fun SongRow(
         modifier = modifier
             .fillMaxWidth()
             .height(60.dp)
-            .auriclePressClickable(onClick = onClick)
+            .auriclePressClickable(
+                onClick = onClick,
+                onLongClick = onOptionsClick,
+                onLongClickLabel = "More options"
+            )
     ) {
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -187,7 +190,11 @@ fun TrackRow(
         modifier = modifier
             .fillMaxWidth()
             .height(52.dp)
-            .auriclePressClickable(onClick = onClick)
+            .auriclePressClickable(
+                onClick = onClick,
+                onLongClick = onOptionsClick,
+                onLongClickLabel = "Track options"
+            )
     ) {
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -270,13 +277,18 @@ fun OnArtQueueRow(
     dragHandleModifier: Modifier = Modifier,
     alpha: Float = 1f,
     onRemove: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+    showDragHandle: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(56.dp)
-            .auriclePressClickable(onClick = onClick)
+            .auriclePressClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
     ) {
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -334,21 +346,25 @@ fun OnArtQueueRow(
                         modifier = Modifier.size(20.dp)
                     )
                 }
-                Spacer(Modifier.width(8.dp))
             }
 
-            Box(
-                modifier = dragHandleModifier
-                    .minimumInteractiveComponentSize()
-                    .size(32.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = AuricleIcons.Grip,
-                    contentDescription = "Drag Handle",
-                    tint = Color.White.copy(alpha = 0.55f),
-                    modifier = Modifier.size(20.dp)
-                )
+            if (showDragHandle) {
+                if (onRemove != null) {
+                    Spacer(Modifier.width(8.dp))
+                }
+                Box(
+                    modifier = dragHandleModifier
+                        .minimumInteractiveComponentSize()
+                        .size(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = AuricleIcons.Grip,
+                        contentDescription = "Drag Handle",
+                        tint = Color.White.copy(alpha = 0.55f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

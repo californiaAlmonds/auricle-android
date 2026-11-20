@@ -3,9 +3,12 @@ package com.auricle.app.ui.components
 import android.os.Build
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Indication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -31,6 +34,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -64,9 +68,15 @@ fun GlassCard(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 fun Modifier.auriclePressClickable(
     enabled: Boolean = true,
     hapticType: HapticFeedbackType? = null,
+    onClickLabel: String? = null,
+    role: Role? = null,
+    indication: Indication? = null,
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     onClick: () -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
@@ -88,10 +98,19 @@ fun Modifier.auriclePressClickable(
 
     this
         .scale(scale)
-        .clickable(
+        .combinedClickable(
             interactionSource = interactionSource,
-            indication = null,
+            indication = indication,
             enabled = enabled,
+            onClickLabel = onClickLabel,
+            onLongClickLabel = onLongClickLabel,
+            role = role,
+            onLongClick = onLongClick?.let { cb ->
+                {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    cb()
+                }
+            },
             onClick = onClick
         )
         .drawWithContent {

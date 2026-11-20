@@ -1,10 +1,12 @@
 package com.auricle.app.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -24,10 +26,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +39,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -52,20 +54,24 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.palette.graphics.Palette
-import coil.ImageLoader
+import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.auricle.app.AuricleApp
 import com.auricle.app.model.AlbumItem
 import com.auricle.app.model.ArtistItem
+import com.auricle.app.model.SearchResultData
 import com.auricle.app.model.SongItem
+import com.auricle.app.model.UserPlaylist
 import com.auricle.app.ui.components.AuricleBottomNav
 import com.auricle.app.ui.components.BottomChromeFade
 import com.auricle.app.ui.components.MiniPlayer
 import com.auricle.app.ui.components.NavigationTab
+import com.auricle.app.ui.screens.ContextMenuItem
 import com.auricle.app.ui.screens.DetailScreen
 import com.auricle.app.ui.screens.DetailTarget
 import com.auricle.app.ui.screens.HomeScreen
+import com.auricle.app.ui.screens.ItemOptionBottomSheet
 import com.auricle.app.ui.screens.LibraryScreen
 import com.auricle.app.ui.screens.NowPlayingSheet
 import com.auricle.app.ui.screens.PartySheet
@@ -117,21 +123,117 @@ class MainActivity : ComponentActivity() {
             val currentPosition by playbackController.currentPosition.collectAsState()
             val duration by playbackController.duration.collectAsState()
             val partySnapshot by playbackController.partySnapshot.collectAsState()
+            val playbackError by playbackController.playbackError.collectAsState()
             val libraryState by libraryRepo.state.collectAsState()
             val updateState by updateRepo.state.collectAsState()
             val hasPendingUpdate by updateRepo.hasPendingUpdate.collectAsState()
 
             var selectedTab by remember { mutableStateOf(NavigationTab.HOME) }
-            var activeDetailTarget by remember { mutableStateOf<DetailTarget?>(null) }
+            val detailBackStack = remember { mutableStateListOf<DetailTarget>() }
+            val activeDetailTarget = detailBackStack.lastOrNull()
+            var searchFocusTrigger by remember { mutableIntStateOf(0) }
+            var searchQuery by remember { mutableStateOf("") }
+            var searchCategory by remember { mutableStateOf("All") }
+            var searchResults by remember { mutableStateOf<SearchResultData?>(null) }
+
             var showNowPlayingSheet by remember { mutableStateOf(false) }
             var showPartySheet by remember { mutableStateOf(false) }
             var prefilledPartyLink by remember { mutableStateOf("") }
             var showSettingsSheet by remember { mutableStateOf(false) }
             var showUpdaterSheet by remember { mutableStateOf(false) }
             var selectedSongForOptions by remember { mutableStateOf<SongItem?>(null) }
+            var songOptionsPlaylistContext by remember { mutableStateOf<UserPlaylist?>(null) }
+            var selectedItemForOptions by remember { mutableStateOf<ContextMenuItem?>(null) }
 
             val scope = rememberCoroutineScope()
             val context = LocalContext.current
+
+            fun isSameDetailTarget(a: DetailTarget?, b: DetailTarget?): Boolean {
+                if (a == null || b == null) return false
+                return when {
+                    a is DetailTarget.Album && b is DetailTarget.Album -> {
+                        val idA = a.albumItem.browseId
+                        val idB = b.albumItem.browseId
+                        if (idA.isNotBlank() && idB.isNotBlank()) {
+                            idA == idB
+                        } else {
+                            a.albumItem.title.isNotBlank() &&
+                                a.albumItem.title.equals(b.albumItem.title, ignoreCase = true) &&
+                                (a.albumItem.artist.isBlank() || b.albumItem.artist.isBlank() ||
+                                    a.albumItem.artist.equals(b.albumItem.artist, ignoreCase = true))
+                        }
+                    }
+                    a is DetailTarget.Artist && b is DetailTarget.Artist -> {
+                        val idA = a.artistItem.browseId
+                        val idB = b.artistItem.browseId
+                        if (idA.isNotBlank() && idB.isNotBlank()) {
+                            idA == idB
+                        } else {
+                            a.artistItem.name.isNotBlank() &&
+                                a.artistItem.name.equals(b.artistItem.name, ignoreCase = true)
+                        }
+                    }
+                    a is DetailTarget.Playlist && b is DetailTarget.Playlist -> {
+                        val idA = a.playlistItem.playlistId
+                        val idB = b.playlistItem.playlistId
+                        if (idA.isNotBlank() && idB.isNotBlank()) {
+                            idA == idB
+                        } else {
+                            a.playlistItem.title.isNotBlank() &&
+                                a.playlistItem.title.equals(b.playlistItem.title, ignoreCase = true)
+                        }
+                    }
+                    a is DetailTarget.CustomUserPlaylist && b is DetailTarget.CustomUserPlaylist -> {
+                        a.playlistId == b.playlistId
+                    }
+                    a is DetailTarget.LikedSongs && b is DetailTarget.LikedSongs -> true
+                    a is DetailTarget.RecentlyPlayed && b is DetailTarget.RecentlyPlayed -> true
+                    else -> false
+                }
+            }
+
+            fun menuItemToDetailTarget(menuItem: ContextMenuItem): DetailTarget = when (menuItem) {
+                is ContextMenuItem.Album -> DetailTarget.Album(menuItem.album)
+                is ContextMenuItem.Artist -> DetailTarget.Artist(menuItem.artist)
+                is ContextMenuItem.RemotePlaylist -> DetailTarget.Playlist(menuItem.playlist)
+                is ContextMenuItem.LocalPlaylist -> DetailTarget.CustomUserPlaylist(menuItem.playlist)
+            }
+
+            fun pushDetail(target: DetailTarget) {
+                if (!isSameDetailTarget(detailBackStack.lastOrNull(), target)) {
+                    detailBackStack.add(target)
+                }
+            }
+
+            fun popDetail() {
+                if (detailBackStack.isNotEmpty()) {
+                    detailBackStack.removeAt(detailBackStack.lastIndex)
+                }
+            }
+
+            LaunchedEffect(currentTrack) {
+                if (currentTrack == null) {
+                    showNowPlayingSheet = false
+                }
+            }
+
+            LaunchedEffect(playbackError) {
+                val err = playbackError
+                if (!err.isNullOrBlank()) {
+                    Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                    playbackController.clearPlaybackError()
+                }
+            }
+
+            LaunchedEffect(updateState) {
+                val isUpdaterVisibleState = updateState is UpdateState.Available ||
+                    updateState is UpdateState.Downloading ||
+                    updateState is UpdateState.Ready ||
+                    (updateState is UpdateState.Error && (updateState as UpdateState.Error).info != null)
+                if (!isUpdaterVisibleState) {
+                    showUpdaterSheet = false
+                }
+            }
 
             // Dynamic Album Art Accent Extraction
             var dynamicAccentColor by remember { mutableStateOf<Color?>(null) }
@@ -139,27 +241,28 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(currentTrack?.videoId, appSettings.dynamicAlbumArtAccent) {
                 val track = currentTrack
                 if (appSettings.dynamicAlbumArtAccent && track != null && track.displayArtworkUrl.isNotBlank()) {
-                    withContext(Dispatchers.IO) {
+                    val extracted = withContext(Dispatchers.IO) {
                         try {
-                            val loader = ImageLoader(context)
                             val request = ImageRequest.Builder(context)
                                 .data(track.displayArtworkUrl)
                                 .size(200)
                                 .allowHardware(false)
                                 .build()
-                            val result = (loader.execute(request) as? SuccessResult)?.drawable
+                            val result = (context.imageLoader.execute(request) as? SuccessResult)?.drawable
                             val bitmap = (result as? BitmapDrawable)?.bitmap
                             if (bitmap != null) {
                                 val palette = Palette.from(bitmap).generate()
                                 val vibrant = palette.vibrantSwatch?.rgb ?: palette.dominantSwatch?.rgb
-                                if (vibrant != null) {
-                                    dynamicAccentColor = Color(vibrant)
-                                }
+                                vibrant?.let { Color(it) }
+                            } else {
+                                null
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "Palette extraction error: ${e.message}")
+                            null
                         }
                     }
+                    dynamicAccentColor = extracted
                 } else {
                     dynamicAccentColor = null
                 }
@@ -186,22 +289,27 @@ class MainActivity : ComponentActivity() {
 
                 BackHandler(
                     enabled = showUpdaterSheet ||
+                        selectedItemForOptions != null ||
                         selectedSongForOptions != null ||
                         showPartySheet ||
                         showSettingsSheet ||
                         showNowPlayingSheet ||
-                        activeDetailTarget != null
+                        detailBackStack.isNotEmpty()
                 ) {
                     when {
                         showUpdaterSheet -> showUpdaterSheet = false
-                        selectedSongForOptions != null -> selectedSongForOptions = null
+                        selectedItemForOptions != null -> selectedItemForOptions = null
+                        selectedSongForOptions != null -> {
+                            selectedSongForOptions = null
+                            songOptionsPlaylistContext = null
+                        }
                         showPartySheet -> {
                             prefilledPartyLink = ""
                             showPartySheet = false
                         }
                         showSettingsSheet -> showSettingsSheet = false
                         showNowPlayingSheet -> showNowPlayingSheet = false
-                        activeDetailTarget != null -> activeDetailTarget = null
+                        detailBackStack.isNotEmpty() -> popDetail()
                     }
                 }
 
@@ -242,38 +350,29 @@ class MainActivity : ComponentActivity() {
                                     },
                                     label = "detailNav"
                                 ) { detailTarget ->
-                                    val animVisibilityScope = this
-                                    val coverSharedMod: @Composable (String) -> Modifier = { key ->
-                                        if (!reducedMotion && key.isNotBlank()) {
-                                            with(sharedLayoutScope) {
-                                                Modifier.sharedElement(
-                                                    state = rememberSharedContentState(key = "album-cover-$key"),
-                                                    animatedVisibilityScope = animVisibilityScope,
-                                                    boundsTransform = { _, _ ->
-                                                        tween(durationMillis = 320, easing = FastOutSlowInEasing)
-                                                    }
-                                                )
-                                            }
-                                        } else {
-                                            Modifier
-                                        }
-                                    }
-
                                     if (detailTarget != null) {
                                         DetailScreen(
                                             target = detailTarget,
                                             musicRepo = musicRepo,
                                             libraryRepo = libraryRepo,
                                             playbackController = playbackController,
-                                            onBackClick = { activeDetailTarget = null },
-                                            onSongOptionsClick = { selectedSongForOptions = it },
-                                            onAlbumClick = { activeDetailTarget = DetailTarget.Album(it) },
-                                            onArtistClick = { activeDetailTarget = DetailTarget.Artist(it) },
+                                            onBackClick = { popDetail() },
+                                            onSongOptionsClick = {
+                                                songOptionsPlaylistContext = null
+                                                selectedSongForOptions = it
+                                            },
+                                            onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
+                                            onArtistClick = { pushDetail(DetailTarget.Artist(it)) },
                                             onBrowseHomeClick = {
-                                                activeDetailTarget = null
+                                                detailBackStack.clear()
                                                 selectedTab = NavigationTab.HOME
                                             },
-                                            coverArtworkModifier = coverSharedMod,
+                                            onAlbumLongClick = { selectedItemForOptions = ContextMenuItem.Album(it) },
+                                            onPlaylistSongOptionsClick = { song, playlist ->
+                                                songOptionsPlaylistContext = playlist
+                                                selectedSongForOptions = song
+                                            },
+                                            onItemOptionsClick = { selectedItemForOptions = it },
                                             bottomContentPadding = bottomContentPadding
                                         )
                                     } else {
@@ -287,23 +386,41 @@ class MainActivity : ComponentActivity() {
                                                     hasUpdateBadge = hasPendingUpdate,
                                                     onPartyClick = { showPartySheet = true },
                                                     onSettingsClick = { showSettingsSheet = true },
-                                                    onSongOptionsClick = { selectedSongForOptions = it },
-                                                    onAlbumClick = { activeDetailTarget = DetailTarget.Album(it) },
-                                                    albumArtworkModifier = coverSharedMod,
+                                                    onSongOptionsClick = {
+                                                        songOptionsPlaylistContext = null
+                                                        selectedSongForOptions = it
+                                                    },
+                                                    onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
+                                                    onAlbumLongClick = { selectedItemForOptions = ContextMenuItem.Album(it) },
+                                                    onArtistLongClick = { selectedItemForOptions = ContextMenuItem.Artist(it) },
+                                                    onPlaylistClick = { pushDetail(DetailTarget.Playlist(it)) },
+                                                    onPlaylistLongClick = { selectedItemForOptions = ContextMenuItem.RemotePlaylist(it) },
                                                     bottomContentPadding = bottomContentPadding
                                                 )
                                             }
                                             NavigationTab.SEARCH -> {
                                                 SearchScreen(
                                                     musicRepo = musicRepo,
-                                                    settingsRepo = settingsRepo,
                                                     libraryRepo = libraryRepo,
                                                     playbackController = playbackController,
-                                                    onSongOptionsClick = { selectedSongForOptions = it },
-                                                    onAlbumClick = { activeDetailTarget = DetailTarget.Album(it) },
-                                                    onArtistClick = { activeDetailTarget = DetailTarget.Artist(it) },
-                                                    onPlaylistClick = { activeDetailTarget = DetailTarget.Playlist(it) },
-                                                    albumArtworkModifier = coverSharedMod,
+                                                    onSongOptionsClick = {
+                                                        songOptionsPlaylistContext = null
+                                                        selectedSongForOptions = it
+                                                    },
+                                                    onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
+                                                    onArtistClick = { pushDetail(DetailTarget.Artist(it)) },
+                                                    onPlaylistClick = { pushDetail(DetailTarget.Playlist(it)) },
+                                                    onAlbumLongClick = { selectedItemForOptions = ContextMenuItem.Album(it) },
+                                                    onArtistLongClick = { selectedItemForOptions = ContextMenuItem.Artist(it) },
+                                                    onPlaylistLongClick = { selectedItemForOptions = ContextMenuItem.RemotePlaylist(it) },
+                                                    focusTrigger = searchFocusTrigger,
+                                                    savedQuery = searchQuery,
+                                                    onSavedQueryChange = { searchQuery = it },
+                                                    savedCategory = searchCategory,
+                                                    onSavedCategoryChange = { searchCategory = it },
+                                                    savedResults = searchResults,
+                                                    onSavedResultsChange = { searchResults = it },
+                                                    settingsRepo = settingsRepo,
                                                     bottomContentPadding = bottomContentPadding
                                                 )
                                             }
@@ -311,14 +428,21 @@ class MainActivity : ComponentActivity() {
                                                 LibraryScreen(
                                                     libraryRepo = libraryRepo,
                                                     playbackController = playbackController,
-                                                    onSongOptionsClick = { selectedSongForOptions = it },
-                                                    onUserPlaylistClick = { activeDetailTarget = DetailTarget.CustomUserPlaylist(it) },
-                                                    onLikedSongsClick = { activeDetailTarget = DetailTarget.LikedSongs },
-                                                    onRecentlyPlayedClick = { activeDetailTarget = DetailTarget.RecentlyPlayed },
-                                                    onArtistClick = { activeDetailTarget = DetailTarget.Artist(it) },
-                                                    onAlbumClick = { activeDetailTarget = DetailTarget.Album(it) },
+                                                    onSongOptionsClick = {
+                                                        songOptionsPlaylistContext = null
+                                                        selectedSongForOptions = it
+                                                    },
+                                                    onUserPlaylistClick = { pushDetail(DetailTarget.CustomUserPlaylist(it)) },
+                                                    onLikedSongsClick = { pushDetail(DetailTarget.LikedSongs) },
+                                                    onRecentlyPlayedClick = { pushDetail(DetailTarget.RecentlyPlayed) },
+                                                    onArtistClick = { pushDetail(DetailTarget.Artist(it)) },
+                                                    onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
+                                                    onAlbumLongClick = { selectedItemForOptions = ContextMenuItem.Album(it) },
+                                                    onArtistLongClick = { selectedItemForOptions = ContextMenuItem.Artist(it) },
+                                                    onPlaylistLongClick = { selectedItemForOptions = ContextMenuItem.LocalPlaylist(it) },
+                                                    onRemotePlaylistClick = { pushDetail(DetailTarget.Playlist(it)) },
+                                                    onRemotePlaylistLongClick = { selectedItemForOptions = ContextMenuItem.RemotePlaylist(it) },
                                                     onBrowseHomeClick = { selectedTab = NavigationTab.HOME },
-                                                    albumArtworkModifier = coverSharedMod,
                                                     bottomContentPadding = bottomContentPadding
                                                 )
                                             }
@@ -377,13 +501,26 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
 
-                                    AuricleBottomNav(
-                                        selectedTab = selectedTab,
-                                        onTabSelected = { tab ->
-                                            activeDetailTarget = null
-                                            selectedTab = tab
-                                        }
-                                    )
+                                    AnimatedVisibility(
+                                        visible = !showNowPlayingSheet,
+                                        enter = if (reducedMotion) fadeIn(tween(0)) else slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+                                        exit = if (reducedMotion) fadeOut(tween(0)) else slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut()
+                                    ) {
+                                        AuricleBottomNav(
+                                            selectedTab = selectedTab,
+                                            onTabSelected = { tab ->
+                                                if (tab == NavigationTab.SEARCH &&
+                                                    selectedTab == NavigationTab.SEARCH &&
+                                                    detailBackStack.isEmpty()
+                                                ) {
+                                                    searchFocusTrigger++
+                                                } else {
+                                                    detailBackStack.clear()
+                                                    selectedTab = tab
+                                                }
+                                            }
+                                        )
+                                    }
                                 }
                             }
 
@@ -421,7 +558,10 @@ class MainActivity : ComponentActivity() {
                                     settingsRepo = settingsRepo,
                                     onDismiss = { showNowPlayingSheet = false },
                                     onPartyClick = { showPartySheet = true },
-                                    onSongOptionsClick = { selectedSongForOptions = it },
+                                    onSongOptionsClick = {
+                                        songOptionsPlaylistContext = null
+                                        selectedSongForOptions = it
+                                    },
                                     artworkModifier = npArtMod
                                 )
                             }
@@ -511,8 +651,12 @@ class MainActivity : ComponentActivity() {
                 // Song Options Modal Bottom Sheet
                 selectedSongForOptions?.let { song ->
                     val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    val activePlaylistCtx = songOptionsPlaylistContext
                     ModalBottomSheet(
-                        onDismissRequest = { selectedSongForOptions = null },
+                        onDismissRequest = {
+                            selectedSongForOptions = null
+                            songOptionsPlaylistContext = null
+                        },
                         sheetState = optionsSheetState,
                         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                         containerColor = AuricleTheme.colors.sheetBg,
@@ -523,30 +667,242 @@ class MainActivity : ComponentActivity() {
                             song = song,
                             playbackController = playbackController,
                             libraryRepo = libraryRepo,
-                            onDismiss = { selectedSongForOptions = null },
+                            playlistContextName = activePlaylistCtx?.name,
+                            onRemoveFromPlaylist = activePlaylistCtx?.let { pl ->
+                                { libraryRepo.removeFromPlaylist(pl.id, song.videoId) }
+                            },
+                            onDismiss = {
+                                selectedSongForOptions = null
+                                songOptionsPlaylistContext = null
+                            },
                             onGoToAlbum = { targetSong ->
-                                showNowPlayingSheet = false
-                                activeDetailTarget = DetailTarget.Album(
-                                    AlbumItem(
-                                        browseId = targetSong.albumId,
-                                        title = targetSong.album.ifBlank { targetSong.title },
-                                        artist = targetSong.artist,
-                                        thumbnailUrl = targetSong.displayArtworkUrl
+                                selectedSongForOptions = null
+                                songOptionsPlaylistContext = null
+                                if (targetSong.album.isNotBlank() || targetSong.albumId.isNotBlank()) {
+                                    showNowPlayingSheet = false
+                                    pushDetail(
+                                        DetailTarget.Album(
+                                            AlbumItem(
+                                                browseId = targetSong.albumId,
+                                                title = targetSong.album,
+                                                artist = targetSong.artist,
+                                                thumbnailUrl = targetSong.displayArtworkUrl
+                                            )
+                                        )
                                     )
-                                )
+                                }
                             },
                             onGoToArtist = { targetSong ->
-                                showNowPlayingSheet = false
-                                activeDetailTarget = DetailTarget.Artist(
-                                    ArtistItem(
-                                        browseId = targetSong.artistId,
-                                        name = targetSong.artist,
-                                        thumbnailUrl = targetSong.displayArtworkUrl
+                                selectedSongForOptions = null
+                                songOptionsPlaylistContext = null
+                                if (targetSong.artist.isNotBlank() || targetSong.artistId.isNotBlank()) {
+                                    showNowPlayingSheet = false
+                                    pushDetail(
+                                        DetailTarget.Artist(
+                                            ArtistItem(
+                                                browseId = targetSong.artistId,
+                                                name = targetSong.artist,
+                                                thumbnailUrl = targetSong.displayArtworkUrl
+                                            )
+                                        )
                                     )
-                                )
+                                }
                             }
                         )
                     }
+                }
+
+                // Item Options Modal Bottom Sheet (Album, Artist, RemotePlaylist, LocalPlaylist)
+                selectedItemForOptions?.let { item ->
+                    val liveLocalPlaylist = if (item is ContextMenuItem.LocalPlaylist) {
+                        libraryState.playlists.find { it.id == item.playlist.id } ?: item.playlist
+                    } else null
+                    val effectiveItem = liveLocalPlaylist?.let { ContextMenuItem.LocalPlaylist(it) } ?: item
+
+                    val isSavedOrFollowed = when (effectiveItem) {
+                        is ContextMenuItem.Album -> libraryRepo.isAlbumSaved(
+                            effectiveItem.album.browseId,
+                            effectiveItem.album.title,
+                            effectiveItem.album.artist
+                        )
+                        is ContextMenuItem.Artist -> libraryRepo.isArtistFollowed(effectiveItem.artist.browseId, effectiveItem.artist.name)
+                        is ContextMenuItem.RemotePlaylist -> libraryRepo.isPlaylistSaved(
+                            effectiveItem.playlist.playlistId,
+                            effectiveItem.playlist.title
+                        )
+                        is ContextMenuItem.LocalPlaylist -> false
+                    }
+                    val targetDetailForItem = menuItemToDetailTarget(effectiveItem)
+                    val alreadyOnTargetDetail = isSameDetailTarget(activeDetailTarget, targetDetailForItem)
+
+                    suspend fun resolveTracksForItem(menuItem: ContextMenuItem): Pair<List<SongItem>, String> {
+                        return when (menuItem) {
+                            is ContextMenuItem.Album -> {
+                                val alb = menuItem.album
+                                val tracks = if (alb.tracks.isNotEmpty()) {
+                                    alb.tracks
+                                } else {
+                                    var bid = alb.browseId
+                                    if (bid.isBlank() && (alb.title.isNotBlank() || alb.artist.isNotBlank())) {
+                                        val q = "${alb.title} ${alb.artist}".trim()
+                                        musicRepo.search(q, "albums").onSuccess { sRes ->
+                                            bid = sRes.albums.firstOrNull()?.browseId.orEmpty()
+                                        }
+                                    }
+                                    if (bid.isNotBlank()) {
+                                        musicRepo.getAlbum(bid).getOrNull()?.tracks.orEmpty()
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                                tracks to alb.title.ifBlank { "Album" }
+                            }
+                            is ContextMenuItem.Artist -> {
+                                val art = menuItem.artist
+                                val songs = if (art.topSongs.isNotEmpty()) {
+                                    art.topSongs
+                                } else {
+                                    var bid = art.browseId
+                                    if (bid.isBlank() && art.name.isNotBlank()) {
+                                        musicRepo.search(art.name, "artists").onSuccess { sRes ->
+                                            bid = sRes.artists.firstOrNull()?.browseId.orEmpty()
+                                        }
+                                    }
+                                    if (bid.isNotBlank()) {
+                                        musicRepo.getArtist(bid).getOrNull()?.topSongs.orEmpty()
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                                songs to art.name.ifBlank { "Artist" }
+                            }
+                            is ContextMenuItem.RemotePlaylist -> {
+                                val pl = menuItem.playlist
+                                val tracks = if (pl.tracks.isNotEmpty()) {
+                                    pl.tracks
+                                } else if (pl.playlistId.isNotBlank()) {
+                                    musicRepo.getPlaylist(pl.playlistId).getOrNull()?.tracks.orEmpty()
+                                } else {
+                                    emptyList()
+                                }
+                                tracks to pl.title.ifBlank { "Playlist" }
+                            }
+                            is ContextMenuItem.LocalPlaylist -> {
+                                menuItem.playlist.tracks to menuItem.playlist.name.ifBlank { "Playlist" }
+                            }
+                        }
+                    }
+
+                    fun launchShareIntent(subject: String, text: String) {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, subject)
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        }
+                        try {
+                            context.startActivity(Intent.createChooser(shareIntent, "Share"))
+                        } catch (_: ActivityNotFoundException) {
+                        }
+                    }
+
+                    ItemOptionBottomSheet(
+                        item = effectiveItem,
+                        isSavedOrFollowed = isSavedOrFollowed,
+                        onDismiss = { selectedItemForOptions = null },
+                        onPlay = {
+                            scope.launch {
+                                val (tracks, label) = resolveTracksForItem(effectiveItem)
+                                if (tracks.isNotEmpty()) {
+                                    playbackController.playTrack(tracks.first(), tracks, label)
+                                } else {
+                                    Toast.makeText(context, "No tracks available to play", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        onShuffle = {
+                            scope.launch {
+                                val (tracks, label) = resolveTracksForItem(effectiveItem)
+                                if (tracks.isNotEmpty()) {
+                                    playbackController.playShuffled(tracks, label)
+                                } else {
+                                    Toast.makeText(context, "No tracks available to shuffle", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        onAddToQueue = {
+                            scope.launch {
+                                val (tracks, _) = resolveTracksForItem(effectiveItem)
+                                if (tracks.isNotEmpty()) {
+                                    tracks.forEach { playbackController.addToQueue(it) }
+                                    Toast.makeText(context, "Added ${tracks.size} to queue", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "No tracks available to queue", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        onToggleSaveOrFollow = when (effectiveItem) {
+                            is ContextMenuItem.Album -> {
+                                { libraryRepo.toggleSaveAlbum(effectiveItem.album) }
+                            }
+                            is ContextMenuItem.Artist -> {
+                                { libraryRepo.toggleFollowArtist(effectiveItem.artist) }
+                            }
+                            is ContextMenuItem.RemotePlaylist -> {
+                                { libraryRepo.toggleSavePlaylist(effectiveItem.playlist) }
+                            }
+                            is ContextMenuItem.LocalPlaylist -> null
+                        },
+                        onOpenDetail = if (alreadyOnTargetDetail) null else {
+                            { pushDetail(targetDetailForItem) }
+                        },
+                        onRenamePlaylist = if (effectiveItem is ContextMenuItem.LocalPlaylist) {
+                            { newName -> libraryRepo.renamePlaylist(effectiveItem.playlist.id, newName) }
+                        } else null,
+                        onDeletePlaylist = if (effectiveItem is ContextMenuItem.LocalPlaylist) {
+                            {
+                                libraryRepo.deletePlaylist(effectiveItem.playlist.id)
+                                detailBackStack.removeAll {
+                                    it is DetailTarget.CustomUserPlaylist && it.playlistId == effectiveItem.playlist.id
+                                }
+                            }
+                        } else null,
+                        onShare = {
+                            when (effectiveItem) {
+                                is ContextMenuItem.Album -> {
+                                    val alb = effectiveItem.album
+                                    val header = listOf(alb.title, alb.artist).filter { it.isNotBlank() }.joinToString(" — ")
+                                    val body = if (alb.browseId.isNotBlank()) {
+                                        "$header\nhttps://music.youtube.com/browse/${alb.browseId}"
+                                    } else header
+                                    if (body.isNotBlank()) launchShareIntent(header.ifBlank { "Album" }, body)
+                                }
+                                is ContextMenuItem.Artist -> {
+                                    val art = effectiveItem.artist
+                                    val body = if (art.browseId.isNotBlank()) {
+                                        "${art.name}\nhttps://music.youtube.com/channel/${art.browseId}"
+                                    } else art.name
+                                    if (body.isNotBlank()) launchShareIntent(art.name.ifBlank { "Artist" }, body)
+                                }
+                                is ContextMenuItem.RemotePlaylist -> {
+                                    val pl = effectiveItem.playlist
+                                    val listId = pl.playlistId.removePrefix("VL")
+                                    val header = listOf(pl.title, pl.author).filter { it.isNotBlank() }.joinToString(" — ")
+                                    val body = if (listId.isNotBlank()) {
+                                        "$header\nhttps://music.youtube.com/playlist?list=$listId"
+                                    } else header
+                                    if (body.isNotBlank()) launchShareIntent(header.ifBlank { "Playlist" }, body)
+                                }
+                                is ContextMenuItem.LocalPlaylist -> {
+                                    val pl = effectiveItem.playlist
+                                    val trackList = pl.tracks.take(15).joinToString("\n") { s ->
+                                        listOf(s.title, s.artist).filter { it.isNotBlank() }.joinToString(" — ")
+                                    }
+                                    val body = if (trackList.isNotBlank()) "${pl.name}\n$trackList" else pl.name
+                                    if (body.isNotBlank()) launchShareIntent(pl.name.ifBlank { "Playlist" }, body)
+                                }
+                            }
+                        }
+                    )
                 }
 
                 // In-App Updater Modal Bottom Sheet
@@ -570,7 +926,17 @@ class MainActivity : ComponentActivity() {
                             updateState = updateState,
                             onDownloadClick = { updateRepo.downloadUpdate() },
                             onCancelDownloadClick = { updateRepo.cancelDownload() },
-                            onInstallClick = { updateRepo.installUpdate(this@MainActivity) },
+                            onInstallClick = {
+                                if (!updateRepo.installUpdate(this@MainActivity) &&
+                                    updateRepo.state.value is UpdateState.Ready
+                                ) {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Enable \"Install unknown apps\" for Auricle, then tap Install again.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            },
                             onDismiss = { showUpdaterSheet = false }
                         )
                     }
