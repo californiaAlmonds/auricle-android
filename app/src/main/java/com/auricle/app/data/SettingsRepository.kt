@@ -1,7 +1,6 @@
 package com.auricle.app.data
 
 import android.content.Context
-import android.os.Build
 import android.util.Log
 import com.auricle.app.model.AccentColorPreset
 import com.auricle.app.model.AppSettings
@@ -17,11 +16,17 @@ import kotlinx.serialization.json.Json
 import java.io.File
 
 class SettingsRepository(private val context: Context, private val scope: CoroutineScope) {
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-        prettyPrint = true
+
+    companion object {
+        val settingsJson = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            coerceInputValues = true
+            prettyPrint = true
+        }
+
+        fun decodeSettings(raw: String): AppSettings =
+            runCatching { settingsJson.decodeFromString<AppSettings>(raw) }.getOrDefault(AppSettings())
     }
 
     private val settingsFile: File by lazy {
@@ -43,7 +48,7 @@ class SettingsRepository(private val context: Context, private val scope: Corout
                 if (settingsFile.exists()) {
                     val content = settingsFile.readText()
                     if (content.isNotBlank()) {
-                        val loaded = json.decodeFromString<AppSettings>(content)
+                        val loaded = decodeSettings(content)
                         _settings.value = loaded
                     }
                 }
@@ -56,7 +61,7 @@ class SettingsRepository(private val context: Context, private val scope: Corout
     private fun persist() {
         scope.launch(Dispatchers.IO) {
             try {
-                val encoded = json.encodeToString(_settings.value)
+                val encoded = settingsJson.encodeToString(_settings.value)
                 settingsFile.writeText(encoded)
             } catch (e: Exception) {
                 Log.e("SettingsRepository", "Error saving settings: ${e.message}")
@@ -81,6 +86,37 @@ class SettingsRepository(private val context: Context, private val scope: Corout
 
     fun updateDisplayName(name: String) {
         _settings.value = _settings.value.copy(userDisplayName = name)
+        persist()
+    }
+
+    fun updateHighQualityAudio(enabled: Boolean) {
+        _settings.value = _settings.value.copy(highQualityAudio = enabled)
+        persist()
+    }
+
+    fun updateAutoplay(enabled: Boolean) {
+        _settings.value = _settings.value.copy(autoplay = enabled)
+        persist()
+    }
+
+    fun updateAutoCheckUpdates(enabled: Boolean) {
+        _settings.value = _settings.value.copy(autoCheckUpdates = enabled)
+        persist()
+    }
+
+    fun addRecentSearch(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return
+        val current = _settings.value.recentSearches
+        val filtered = current.filterNot { it.equals(trimmed, ignoreCase = true) }
+        val updated = listOf(trimmed) + filtered
+        val capped = updated.take(10)
+        _settings.value = _settings.value.copy(recentSearches = capped)
+        persist()
+    }
+
+    fun clearRecentSearches() {
+        _settings.value = _settings.value.copy(recentSearches = emptyList())
         persist()
     }
 }

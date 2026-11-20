@@ -128,6 +128,18 @@ class LibraryRepository(private val context: Context, private val scope: Corouti
         persist()
     }
 
+    fun renamePlaylist(playlistId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return
+        val list = _state.value.playlists.map { playlist ->
+            if (playlist.id == playlistId) {
+                playlist.copy(name = trimmed)
+            } else playlist
+        }
+        _state.value = _state.value.copy(playlists = list)
+        persist()
+    }
+
     fun deletePlaylist(playlistId: String) {
         val list = _state.value.playlists.filterNot { it.id == playlistId }
         _state.value = _state.value.copy(playlists = list)

@@ -13,8 +13,8 @@ android {
         applicationId = "com.auricle.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 2
+        versionName = "0.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -78,12 +78,15 @@ android {
         freeCompilerArgs += listOf(
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
             "-opt-in=androidx.media3.common.util.UnstableApi",
-            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi"
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+            "-opt-in=androidx.compose.animation.ExperimentalSharedTransitionApi",
+            "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi"
         )
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -131,6 +134,8 @@ dependencies {
 
     implementation(libs.newpipe.extractor)
     implementation("org.rustls:rustls-platform-verifier:0.2.0")
+
+    testImplementation(libs.junit)
 
     debugImplementation(libs.androidx.ui.tooling)
 }

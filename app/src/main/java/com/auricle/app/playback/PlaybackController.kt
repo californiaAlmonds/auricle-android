@@ -15,6 +15,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.auricle.app.bridge.AuricleNative
 import com.auricle.app.data.LibraryRepository
 import com.auricle.app.data.MusicRepository
+import com.auricle.app.data.SettingsRepository
 import com.auricle.app.model.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +31,7 @@ class PlaybackController(
     private val context: Context,
     private val musicRepo: MusicRepository,
     private val libraryRepo: LibraryRepository,
+    private val settingsRepo: SettingsRepository? = null,
     private val coroutineScope: CoroutineScope
 ) {
     private val TAG = "PlaybackController"
@@ -69,6 +71,12 @@ class PlaybackController(
     private val _isShuffle = MutableStateFlow(false)
     val isShuffle: StateFlow<Boolean> = _isShuffle.asStateFlow()
 
+    private val _playingFrom = MutableStateFlow("Queue")
+    val playingFrom: StateFlow<String> = _playingFrom.asStateFlow()
+
+    private val _autoplayCandidates = MutableStateFlow<List<SongItem>>(emptyList())
+    val autoplayCandidates: StateFlow<List<SongItem>> = _autoplayCandidates.asStateFlow()
+
     // Party State
     private val _partySnapshot = MutableStateFlow(PartySnapshot())
     val partySnapshot: StateFlow<PartySnapshot> = _partySnapshot.asStateFlow()
@@ -77,6 +85,7 @@ class PlaybackController(
     private var lastLoadedVideoId: String? = null
     private var retriedErrorVideoId: String? = null
     private var streamResolveJob: Job? = null
+    private var autoplayFetchJob: Job? = null
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
 
     private data class PendingPlayback(
@@ -327,20 +336,48 @@ class PlaybackController(
     }
 
     private fun sendPartyAction(action: PartyAction) {
-        if (isApplyingRemoteParty) return
+        sendPartyActionsSequential(action)
+    }
+
+    private fun sendPartyActionsSequential(vararg actions: PartyAction) {
+        if (isApplyingRemoteParty || actions.isEmpty()) return
         if (!_partySnapshot.value.isActive) return
 
         coroutineScope.launch(Dispatchers.IO) {
-            try {
-                val actionJson = json.encodeToString(action)
-                AuricleNative.nativePartySendAction(actionJson)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending party action: ${e.message}")
+            for (action in actions) {
+                try {
+                    val actionJson = json.encodeToString(action)
+                    AuricleNative.nativePartySendAction(actionJson)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error sending party action: ${e.message}")
+                }
             }
         }
     }
 
-    fun playTrack(song: SongItem, newQueue: List<SongItem> = listOf(song)) {
+    fun syncPartyQueuePreservingPosition() {
+        if (!_partySnapshot.value.isActive || isApplyingRemoteParty) return
+        val preservedPosMs = (exoPlayer?.currentPosition ?: _currentPosition.value).coerceAtLeast(0L)
+        val replaceAction = PartyAction(
+            type = "replace_queue",
+            tracks = _queue.value,
+            startIndex = _currentIndex.value,
+            isPlaying = _isPlaying.value
+        )
+        if (preservedPosMs > 0L) {
+            sendPartyActionsSequential(
+                replaceAction,
+                PartyAction(type = "seek", positionMs = preservedPosMs)
+            )
+        } else {
+            sendPartyActionsSequential(replaceAction)
+        }
+    }
+
+    fun playTrack(song: SongItem, newQueue: List<SongItem> = listOf(song), sourceLabel: String? = null) {
+        if (sourceLabel != null) {
+            _playingFrom.value = sourceLabel
+        }
         val targetQueue = if (newQueue.none { it.videoId == song.videoId }) {
             listOf(song) + newQueue
         } else newQueue
@@ -372,12 +409,64 @@ class PlaybackController(
         }
     }
 
+    fun playTracksShuffled(tracks: List<SongItem>, sourceLabel: String? = null) {
+        if (tracks.isEmpty()) return
+        val shuffled = tracks.shuffled()
+        _isShuffle.value = true
+        if (sourceLabel != null) {
+            _playingFrom.value = sourceLabel
+        }
+        playTrack(shuffled.first(), shuffled, sourceLabel)
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int, syncParty: Boolean = true) {
+        val currentQ = _queue.value.toMutableList()
+        if (fromIndex !in currentQ.indices || toIndex !in currentQ.indices || fromIndex == toIndex) return
+
+        val item = currentQ.removeAt(fromIndex)
+        currentQ.add(toIndex, item)
+        _queue.value = currentQ
+
+        val currentIdx = _currentIndex.value
+        if (fromIndex == currentIdx) {
+            _currentIndex.value = toIndex
+        } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
+            _currentIndex.value = currentIdx - 1
+        } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
+            _currentIndex.value = currentIdx + 1
+        }
+
+        if (syncParty) {
+            syncPartyQueuePreservingPosition()
+        }
+    }
+
+    fun clearUpcomingQueue() {
+        val current = _currentTrack.value
+        val items = listOfNotNull(current)
+        _queue.value = items
+        _currentIndex.value = 0
+
+        syncPartyQueuePreservingPosition()
+    }
+
     private fun playSongInternal(song: SongItem, startPositionMs: Long = 0L, autoPlay: Boolean = true) {
         _currentTrack.value = song
         _isLoading.value = true
         lastLoadedVideoId = song.videoId
         retriedErrorVideoId = null
         libraryRepo.recordRecentlyPlayed(song)
+
+        autoplayFetchJob?.cancel()
+        autoplayFetchJob = coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val related = musicRepo.getWatchPlaylist(song.videoId)
+                val existingIds = _queue.value.map { it.videoId }.toSet()
+                _autoplayCandidates.value = related.filterNot { existingIds.contains(it.videoId) }
+            } catch (e: Exception) {
+                Log.e(TAG, "Autoplay fetch error: ${e.message}")
+            }
+        }
 
         streamResolveJob?.cancel()
         streamResolveJob = coroutineScope.launch {
@@ -651,16 +740,7 @@ class PlaybackController(
             }
         }
 
-        if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
-            sendPartyAction(
-                PartyAction(
-                    type = "replace_queue",
-                    tracks = _queue.value,
-                    startIndex = _currentIndex.value,
-                    isPlaying = _isPlaying.value
-                )
-            )
-        }
+        syncPartyQueuePreservingPosition()
     }
 
     private fun handleTrackEnded() {
@@ -699,28 +779,42 @@ class PlaybackController(
             }
         } else {
 
+            val autoplayAllowed = settingsRepo?.settings?.value?.autoplay ?: true
             if (!isPartyActive || isHost) {
-                coroutineScope.launch {
-                    val related = musicRepo.getWatchPlaylist(current.videoId)
-                    val existingIds = q.map { it.videoId }.toSet()
-                    val freshTracks = related.filterNot { existingIds.contains(it.videoId) }
-                    if (freshTracks.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            val updatedQ = q + freshTracks
-                            _queue.value = updatedQ
-                            _currentIndex.value = nextIdx
-                            val nextSong = updatedQ[nextIdx]
-                            playSongInternal(nextSong, startPositionMs = 0L, autoPlay = true)
+                if (autoplayAllowed) {
+                    coroutineScope.launch {
+                        val candidates = _autoplayCandidates.value
+                        val freshTracks = if (candidates.isNotEmpty()) {
+                            candidates
+                        } else {
+                            try {
+                                val related = withContext(Dispatchers.IO) { musicRepo.getWatchPlaylist(current.videoId) }
+                                val existingIds = q.map { it.videoId }.toSet()
+                                related.filterNot { existingIds.contains(it.videoId) }
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
 
-                            if (isPartyActive && isHost) {
-                                sendPartyAction(
-                                    PartyAction(
-                                        type = "replace_queue",
-                                        tracks = updatedQ,
-                                        startIndex = nextIdx,
-                                        isPlaying = true
+                        if (freshTracks.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                if (_currentTrack.value?.videoId != current.videoId) return@withContext
+                                val updatedQ = q + freshTracks
+                                _queue.value = updatedQ
+                                _currentIndex.value = nextIdx
+                                val nextSong = updatedQ[nextIdx]
+                                playSongInternal(nextSong, startPositionMs = 0L, autoPlay = true)
+
+                                if (isPartyActive && isHost) {
+                                    sendPartyAction(
+                                        PartyAction(
+                                            type = "replace_queue",
+                                            tracks = updatedQ,
+                                            startIndex = nextIdx,
+                                            isPlaying = true
+                                        )
                                     )
-                                )
+                                }
                             }
                         }
                     }
