@@ -1,0 +1,43 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="18"
+        android:translateY="18"
+        android:scaleX="0.67"
+        android:scaleY="0.67">
+        <!-- Glowing Auricle Ring / Sound Aura -->
+        <path
+            android:pathData="M54,14 C31.9,14 14,31.9 14,54 C14,76.1 31.9,94 54,94 C76.1,94 94,76.1 94,54 C94,31.9 76.1,14 54,14 Z M54,84 C37.4,84 24,70.6 24,54 C24,37.4 37.4,24 54,24 C70.6,24 84,37.4 84,54 C84,70.6 70.6,84 54,84 Z">
+            <aapt:attr name="android:fillColor" xmlns:aapt="http://schemas.android.com/aapt">
+                <gradient
+                    android:startX="14"
+                    android:startY="14"
+                    android:endX="94"
+                    android:endY="94"
+                    android:type="linear">
+                    <item android:offset="0.0" android:color="#5B8DEF" />
+                    <item android:offset="0.6" android:color="#8B5CF6" />
+                    <item android:offset="1.0" android:color="#EC4899" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- Center Play / Audio Wave Node -->
+        <path
+            android:pathData="M44,38 L72,54 L44,70 Z">
+            <aapt:attr name="android:fillColor" xmlns:aapt="http://schemas.android.com/aapt">
+                <gradient
+                    android:startX="44"
+                    android:startY="38"
+                    android:endX="72"
+                    android:endY="70"
+                    android:type="linear">
+                    <item android:offset="0.0" android:color="#FFFFFF" />
+                    <item android:offset="1.0" android:color="#C7D2FE" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

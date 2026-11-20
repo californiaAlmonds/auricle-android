@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Auricle</string>
+    <string name="playback_channel_name">Auricle Playback</string>
+    <string name="playback_channel_description">Shows current playing track and controls</string>
+</resources>

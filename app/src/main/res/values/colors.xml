@@ -1,0 +1,7 @@
+<resources>
+    <color name="auricle_accent">#5B8DEF</color>
+    <color name="auricle_canvas">#06080D</color>
+    <color name="auricle_bg">#0D1118</color>
+    <color name="auricle_surface">#12161F</color>
+    <color name="auricle_primary_text">#F2F4F8</color>
+</resources>
