@@ -11,9 +11,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 class SettingsRepository(private val context: Context, private val scope: CoroutineScope) {
 
@@ -33,23 +37,25 @@ class SettingsRepository(private val context: Context, private val scope: Corout
         File(context.filesDir, "settings.json")
     }
 
+    private val stateLock = Any()
+    private val persistMutex = Mutex()
+
     private val _settings = MutableStateFlow(
         AppSettings(userDisplayName = "Android Listener")
     )
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
     init {
-        loadSettings()
+        loadSettingsSync()
     }
 
-    private fun loadSettings() {
-        scope.launch(Dispatchers.IO) {
+    private fun loadSettingsSync() {
+        synchronized(stateLock) {
             try {
                 if (settingsFile.exists()) {
                     val content = settingsFile.readText()
                     if (content.isNotBlank()) {
-                        val loaded = decodeSettings(content)
-                        _settings.value = loaded
+                        _settings.value = decodeSettings(content)
                     }
                 }
             } catch (e: Exception) {
@@ -60,63 +66,90 @@ class SettingsRepository(private val context: Context, private val scope: Corout
 
     private fun persist() {
         scope.launch(Dispatchers.IO) {
-            try {
-                val encoded = settingsJson.encodeToString(_settings.value)
-                settingsFile.writeText(encoded)
-            } catch (e: Exception) {
-                Log.e("SettingsRepository", "Error saving settings: ${e.message}")
+            persistMutex.withLock {
+                try {
+                    val snapshot = synchronized(stateLock) { _settings.value }
+                    val encoded = settingsJson.encodeToString(snapshot)
+                    val parent = settingsFile.parentFile
+                    if (parent != null && !parent.exists()) {
+                        parent.mkdirs()
+                    }
+                    val tmpFile = File(parent, "${settingsFile.name}.tmp")
+                    tmpFile.writeText(encoded)
+                    try {
+                        Files.move(
+                            tmpFile.toPath(),
+                            settingsFile.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE
+                        )
+                    } catch (_: Exception) {
+                        try {
+                            Files.move(
+                                tmpFile.toPath(),
+                                settingsFile.toPath(),
+                                StandardCopyOption.REPLACE_EXISTING
+                            )
+                        } catch (_: Exception) {
+                            if (!tmpFile.renameTo(settingsFile)) {
+                                settingsFile.writeText(encoded)
+                                tmpFile.delete()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("SettingsRepository", "Error saving settings: ${e.message}")
+                }
             }
         }
     }
 
-    fun updateThemeMode(mode: ThemeMode) {
-        _settings.value = _settings.value.copy(themeMode = mode)
+    private inline fun updateAndPersist(transform: (AppSettings) -> AppSettings) {
+        synchronized(stateLock) {
+            _settings.value = transform(_settings.value)
+        }
         persist()
+    }
+
+    fun updateThemeMode(mode: ThemeMode) {
+        updateAndPersist { it.copy(themeMode = mode) }
     }
 
     fun updateAccentPreset(preset: AccentColorPreset) {
-        _settings.value = _settings.value.copy(accentPreset = preset)
-        persist()
+        updateAndPersist { it.copy(accentPreset = preset) }
     }
 
     fun updateDynamicAlbumArt(enabled: Boolean) {
-        _settings.value = _settings.value.copy(dynamicAlbumArtAccent = enabled)
-        persist()
+        updateAndPersist { it.copy(dynamicAlbumArtAccent = enabled) }
     }
 
     fun updateDisplayName(name: String) {
-        _settings.value = _settings.value.copy(userDisplayName = name)
-        persist()
+        updateAndPersist { it.copy(userDisplayName = name) }
     }
 
     fun updateHighQualityAudio(enabled: Boolean) {
-        _settings.value = _settings.value.copy(highQualityAudio = enabled)
-        persist()
+        updateAndPersist { it.copy(highQualityAudio = enabled) }
     }
 
     fun updateAutoplay(enabled: Boolean) {
-        _settings.value = _settings.value.copy(autoplay = enabled)
-        persist()
+        updateAndPersist { it.copy(autoplay = enabled) }
     }
 
     fun updateAutoCheckUpdates(enabled: Boolean) {
-        _settings.value = _settings.value.copy(autoCheckUpdates = enabled)
-        persist()
+        updateAndPersist { it.copy(autoCheckUpdates = enabled) }
     }
 
     fun addRecentSearch(query: String) {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return
-        val current = _settings.value.recentSearches
-        val filtered = current.filterNot { it.equals(trimmed, ignoreCase = true) }
-        val updated = listOf(trimmed) + filtered
-        val capped = updated.take(10)
-        _settings.value = _settings.value.copy(recentSearches = capped)
-        persist()
+        updateAndPersist { currentSettings ->
+            val filtered = currentSettings.recentSearches.filterNot { it.equals(trimmed, ignoreCase = true) }
+            val updated = (listOf(trimmed) + filtered).take(10)
+            currentSettings.copy(recentSearches = updated)
+        }
     }
 
     fun clearRecentSearches() {
-        _settings.value = _settings.value.copy(recentSearches = emptyList())
-        persist()
+        updateAndPersist { it.copy(recentSearches = emptyList()) }
     }
 }

@@ -63,22 +63,34 @@ class AuriclePlaybackService : MediaSessionService() {
         controller.attachPlayer(player)
 
         val forwardingPlayer = object : ForwardingPlayer(player) {
+            private fun canSeekNext(): Boolean = controller.canSkipNext()
+            private fun canSeekPrevious(): Boolean = controller.queue.value.isNotEmpty()
+
             override fun getAvailableCommands(): Player.Commands {
-                return super.getAvailableCommands()
-                    .buildUpon()
-                    .add(Player.COMMAND_SEEK_TO_NEXT)
-                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                    .build()
+                val builder = super.getAvailableCommands().buildUpon()
+                if (canSeekNext()) {
+                    builder.add(Player.COMMAND_SEEK_TO_NEXT)
+                    builder.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                } else {
+                    builder.remove(Player.COMMAND_SEEK_TO_NEXT)
+                    builder.remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                }
+                if (canSeekPrevious()) {
+                    builder.add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    builder.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                } else {
+                    builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                }
+                return builder.build()
             }
 
             override fun isCommandAvailable(command: Int): Boolean {
                 return when (command) {
                     Player.COMMAND_SEEK_TO_NEXT,
-                    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> canSeekNext()
                     Player.COMMAND_SEEK_TO_PREVIOUS,
-                    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> controller.queue.value.isNotEmpty()
+                    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> canSeekPrevious()
                     else -> super.isCommandAvailable(command)
                 }
             }
@@ -91,11 +103,35 @@ class AuriclePlaybackService : MediaSessionService() {
                 controller.setPlaying(false)
             }
 
+            override fun setPlayWhenReady(playWhenReady: Boolean) {
+                controller.setPlaying(playWhenReady)
+            }
+
+            override fun seekToDefaultPosition() {
+                controller.seekTo(0L)
+            }
+
+            override fun seekToDefaultPosition(mediaItemIndex: Int) {
+                controller.seekTo(0L)
+            }
+
+            override fun seekBack() {
+                val target = (controller.currentPosition.value - seekBackIncrement).coerceAtLeast(0L)
+                controller.seekTo(target)
+            }
+
+            override fun seekForward() {
+                val target = controller.currentPosition.value + seekForwardIncrement
+                controller.seekTo(target)
+            }
+
             override fun seekTo(positionMs: Long) {
+                if (positionMs == C.TIME_UNSET) return
                 controller.seekTo(positionMs)
             }
 
             override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+                if (positionMs == C.TIME_UNSET) return
                 controller.seekTo(positionMs)
             }
 
