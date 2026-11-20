@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use ytmapi_rs::common::{VideoID, YoutubeID};
+use ytmapi_rs::error::ErrorKind;
 use ytmapi_rs::query::{GetLyricsIDQuery, GetLyricsQuery};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -26,6 +28,13 @@ pub struct LyricsResponse {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct GtxSentence {
+    pub orig: String,
+    pub trans: String,
+    pub src_translit: String,
+}
+
+#[derive(Clone, Debug, Default)]
 struct CachedRawLyrics {
     available: bool,
     text: String,
@@ -33,13 +42,14 @@ struct CachedRawLyrics {
 }
 
 #[derive(Clone, Debug, Default)]
-struct CachedEnglishLyrics {
-    is_already_en: bool,
-    lines: Vec<LyricLineDto>,
+pub struct CachedEnglishLyrics {
+    pub is_already_en: bool,
+    pub lines: Vec<LyricLineDto>,
 }
 
 static RAW_LYRICS_CACHE: OnceLock<Mutex<HashMap<String, CachedRawLyrics>>> = OnceLock::new();
 static EN_LYRICS_CACHE: OnceLock<Mutex<HashMap<String, CachedEnglishLyrics>>> = OnceLock::new();
+static TRANSLATE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn raw_lyrics_cache() -> &'static Mutex<HashMap<String, CachedRawLyrics>> {
     RAW_LYRICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -49,43 +59,225 @@ fn en_lyrics_cache() -> &'static Mutex<HashMap<String, CachedEnglishLyrics>> {
     EN_LYRICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn translate_client() -> &'static reqwest::Client {
+    TRANSLATE_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 pub fn has_non_latin_script(text: &str) -> bool {
     text.chars()
         .any(|c| !c.is_ascii() && c.is_alphabetic() && (c as u32) > 0x024F)
 }
 
-pub fn parse_gtx_chunk_json(val: &serde_json::Value) -> Option<(String, String, String)> {
+pub fn parse_gtx_chunk_json(val: &serde_json::Value) -> Option<(String, Vec<GtxSentence>)> {
     let src_lang = val.get("src").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let sentences = val.get("sentences")?.as_array()?;
-    let mut translated_chunk = String::new();
-    let mut romanized_chunk = String::new();
+    let sentences_arr = val.get("sentences")?.as_array()?;
+    let mut raw_sentences = Vec::with_capacity(sentences_arr.len());
+    for s in sentences_arr {
+        let orig = s
+            .get("orig")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .replace("\r\n", "\n");
+        let trans = s
+            .get("trans")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .replace("\r\n", "\n");
+        let src_translit = s
+            .get("src_translit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .replace("\r\n", "\n");
+        raw_sentences.push(GtxSentence {
+            orig,
+            trans,
+            src_translit,
+        });
+    }
+    Some((src_lang, normalize_gtx_chunk_sentences(&raw_sentences)))
+}
+
+#[derive(Default)]
+struct PairedLine {
+    orig: String,
+    trans: String,
+    rom: String,
+}
+
+fn reconstruct_paired_lines(sentences: &[GtxSentence]) -> Vec<PairedLine> {
+    let mut lines: Vec<PairedLine> = Vec::new();
+    let mut cur = PairedLine::default();
+    let mut has_inline_rom = false;
+    let mut summary_rom = String::new();
+
     for s in sentences {
-        if let Some(trans) = s.get("trans").and_then(|v| v.as_str()) {
-            translated_chunk.push_str(trans);
+        let is_translit_only =
+            s.orig.is_empty() && s.trans.is_empty() && !s.src_translit.is_empty();
+        if is_translit_only {
+            if !summary_rom.is_empty() && !summary_rom.ends_with('\n') {
+                summary_rom.push('\n');
+            }
+            summary_rom.push_str(&s.src_translit);
+            continue;
         }
-        if let Some(translit) = s.get("src_translit").and_then(|v| v.as_str()) {
-            romanized_chunk.push_str(translit);
+
+        if !s.src_translit.trim().is_empty() {
+            has_inline_rom = true;
+        }
+
+        let orig_parts: Vec<&str> = s.orig.split('\n').collect();
+        let trans_parts: Vec<&str> = s.trans.split('\n').collect();
+        let rom_parts: Vec<&str> = s.src_translit.split('\n').collect();
+        let count = orig_parts.len().max(trans_parts.len()).max(rom_parts.len());
+
+        for idx in 0..count {
+            if idx > 0 {
+                lines.push(std::mem::take(&mut cur));
+            }
+            if let Some(o) = orig_parts.get(idx) {
+                cur.orig.push_str(o);
+            }
+            if let Some(t) = trans_parts.get(idx) {
+                cur.trans.push_str(t);
+            }
+            if let Some(r) = rom_parts.get(idx) {
+                cur.rom.push_str(r);
+            }
         }
     }
-    Some((src_lang, translated_chunk, romanized_chunk))
+
+    if !(cur.orig.is_empty() && cur.trans.is_empty() && cur.rom.is_empty()) {
+        lines.push(cur);
+    }
+
+    if !summary_rom.is_empty() {
+        let rom_lines: Vec<&str> = summary_rom.split('\n').collect();
+        if lines.is_empty() {
+            for r in rom_lines {
+                lines.push(PairedLine {
+                    orig: String::new(),
+                    trans: String::new(),
+                    rom: r.to_string(),
+                });
+            }
+        } else if !has_inline_rom {
+            for (idx, line) in lines.iter_mut().enumerate() {
+                if let Some(r) = rom_lines.get(idx) {
+                    line.rom = (*r).to_string();
+                }
+            }
+        } else {
+            for (idx, line) in lines.iter_mut().enumerate() {
+                if line.rom.trim().is_empty() {
+                    if let Some(r) = rom_lines.get(idx) {
+                        line.rom = (*r).to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    lines
+}
+
+fn normalize_gtx_chunk_sentences(raw_sentences: &[GtxSentence]) -> Vec<GtxSentence> {
+    let paired = reconstruct_paired_lines(raw_sentences);
+    let len = paired.len();
+    paired
+        .into_iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let suffix = if idx + 1 < len { "\n" } else { "" };
+            GtxSentence {
+                orig: format!("{}{}", p.orig, suffix),
+                trans: format!("{}{}", p.trans, suffix),
+                src_translit: format!("{}{}", p.rom, suffix),
+            }
+        })
+        .collect()
+}
+
+fn push_paired_line(raw_lines: &mut Vec<LyricLineDto>, line: &PairedLine, use_rom: bool) {
+    let o = line.orig.trim();
+    let r = line.rom.trim();
+    let t = line.trans.trim();
+
+    if o.is_empty() && r.is_empty() && t.is_empty() {
+        if !raw_lines
+            .last()
+            .map(|l: &LyricLineDto| l.is_spacer)
+            .unwrap_or(false)
+        {
+            raw_lines.push(LyricLineDto {
+                primary: String::new(),
+                secondary: String::new(),
+                is_spacer: true,
+            });
+        }
+    } else if use_rom {
+        let primary = if !r.is_empty() {
+            r.to_string()
+        } else {
+            t.to_string()
+        };
+        let secondary = if !t.is_empty() && !t.eq_ignore_ascii_case(&primary) {
+            t.to_string()
+        } else {
+            String::new()
+        };
+        raw_lines.push(LyricLineDto {
+            primary,
+            secondary,
+            is_spacer: false,
+        });
+    } else if !t.is_empty() {
+        raw_lines.push(LyricLineDto {
+            primary: t.to_string(),
+            secondary: String::new(),
+            is_spacer: false,
+        });
+    } else if !raw_lines
+        .last()
+        .map(|l: &LyricLineDto| l.is_spacer)
+        .unwrap_or(false)
+    {
+        raw_lines.push(LyricLineDto {
+            primary: String::new(),
+            secondary: String::new(),
+            is_spacer: true,
+        });
+    }
 }
 
 pub fn build_english_lyrics(
     original_text: &str,
     src_lang: &str,
-    translated_text: &str,
-    romanized_text: &str,
+    sentences: &[GtxSentence],
 ) -> CachedEnglishLyrics {
     let original_text = original_text.replace("\r\n", "\n");
-    let translated_text = translated_text.replace("\r\n", "\n");
-    let romanized_text = romanized_text.replace("\r\n", "\n");
+    let paired_lines = reconstruct_paired_lines(sentences);
+    let mut translated_text = String::new();
+    let mut has_romanization = false;
+    for (idx, line) in paired_lines.iter().enumerate() {
+        if idx > 0 {
+            translated_text.push('\n');
+        }
+        translated_text.push_str(&line.trans);
+        if !line.rom.trim().is_empty() {
+            has_romanization = true;
+        }
+    }
 
     let non_latin = has_non_latin_script(&original_text);
     if !non_latin
         && (src_lang.eq_ignore_ascii_case("en")
             || src_lang.to_ascii_lowercase().starts_with("en-")
-            || (src_lang.eq_ignore_ascii_case("en")
-                && original_text.trim().eq_ignore_ascii_case(translated_text.trim()))
             || (src_lang.is_empty()
                 && original_text.trim().eq_ignore_ascii_case(translated_text.trim())))
     {
@@ -95,71 +287,10 @@ pub fn build_english_lyrics(
         };
     }
 
-    let mut raw_lines = Vec::new();
-    if non_latin && !romanized_text.trim().is_empty() {
-        let orig_lines: Vec<&str> = original_text.split('\n').collect();
-        let rom_lines: Vec<&str> = romanized_text.split('\n').collect();
-        let trans_lines: Vec<&str> = translated_text.split('\n').collect();
-        let count = orig_lines.len().max(rom_lines.len()).max(trans_lines.len());
-
-        for idx in 0..count {
-            let o = orig_lines.get(idx).map(|s| s.trim()).unwrap_or("");
-            let r = rom_lines.get(idx).map(|s| s.trim()).unwrap_or("");
-            let t = trans_lines.get(idx).map(|s| s.trim()).unwrap_or("");
-
-            if o.is_empty() && r.is_empty() && t.is_empty() {
-                if !raw_lines
-                    .last()
-                    .map(|l: &LyricLineDto| l.is_spacer)
-                    .unwrap_or(false)
-                {
-                    raw_lines.push(LyricLineDto {
-                        primary: String::new(),
-                        secondary: String::new(),
-                        is_spacer: true,
-                    });
-                }
-            } else {
-                let primary = if !r.is_empty() {
-                    r.to_string()
-                } else {
-                    t.to_string()
-                };
-                let secondary = if !t.is_empty() && !t.eq_ignore_ascii_case(&primary) {
-                    t.to_string()
-                } else {
-                    String::new()
-                };
-                raw_lines.push(LyricLineDto {
-                    primary,
-                    secondary,
-                    is_spacer: false,
-                });
-            }
-        }
-    } else {
-        for line in translated_text.split('\n') {
-            let t = line.trim();
-            if t.is_empty() {
-                if !raw_lines
-                    .last()
-                    .map(|l: &LyricLineDto| l.is_spacer)
-                    .unwrap_or(false)
-                {
-                    raw_lines.push(LyricLineDto {
-                        primary: String::new(),
-                        secondary: String::new(),
-                        is_spacer: true,
-                    });
-                }
-            } else {
-                raw_lines.push(LyricLineDto {
-                    primary: t.to_string(),
-                    secondary: String::new(),
-                    is_spacer: false,
-                });
-            }
-        }
+    let use_rom = non_latin && has_romanization;
+    let mut raw_lines = Vec::with_capacity(paired_lines.len());
+    for line in &paired_lines {
+        push_paired_line(&mut raw_lines, line, use_rom);
     }
 
     let mut start = 0;
@@ -230,14 +361,13 @@ pub async fn translate_lyrics_to_english(original: &str) -> Result<CachedEnglish
     }
 
     let chunks = split_stanza_chunks(&normalized, 2800);
-    let client = reqwest::Client::new();
+    let client = translate_client();
     let url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&dt=rm&dj=1";
 
-    let mut all_trans_chunks = Vec::new();
-    let mut all_rom_chunks = Vec::new();
+    let mut all_sentences: Vec<GtxSentence> = Vec::new();
     let mut detected_lang = String::new();
 
-    for chunk in chunks {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let resp = client
             .post(url)
             .form(&[("q", chunk.as_str())])
@@ -254,7 +384,7 @@ pub async fn translate_lyrics_to_english(original: &str) -> Result<CachedEnglish
             .await
             .map_err(|e| format!("Failed to parse translation JSON: {e}"))?;
 
-        let (src_lang, trans_chunk, rom_chunk) = parse_gtx_chunk_json(&json_val)
+        let (src_lang, chunk_sentences) = parse_gtx_chunk_json(&json_val)
             .ok_or_else(|| "Failed to parse translation sentences".to_string())?;
 
         if detected_lang.is_empty()
@@ -263,18 +393,20 @@ pub async fn translate_lyrics_to_english(original: &str) -> Result<CachedEnglish
             detected_lang = src_lang;
         }
 
-        all_trans_chunks.push(trans_chunk);
-        all_rom_chunks.push(rom_chunk);
+        if chunk_idx > 0 {
+            all_sentences.push(GtxSentence {
+                orig: "\n\n".to_string(),
+                trans: "\n\n".to_string(),
+                src_translit: "\n\n".to_string(),
+            });
+        }
+        all_sentences.extend(chunk_sentences);
     }
-
-    let translated_text = all_trans_chunks.join("\n\n");
-    let romanized_text = all_rom_chunks.join("\n\n");
 
     Ok(build_english_lyrics(
         &normalized,
         &detected_lang,
-        &translated_text,
-        &romanized_text,
+        &all_sentences,
     ))
 }
 
@@ -306,22 +438,33 @@ pub async fn get_lyrics(video_id: &str, lang_mode: &str) -> LyricsResponse {
                 .await
             {
                 Ok(id) => id,
-                Err(_) => {
-                    let r = CachedRawLyrics {
-                        available: false,
-                        text: String::new(),
-                        source: String::new(),
-                    };
-                    if let Ok(mut c) = raw_lyrics_cache().lock() {
-                        c.insert(video_id.to_string(), r.clone());
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if matches!(e.into_kind(), ErrorKind::JsonParsing(_)) {
+                        let r = CachedRawLyrics {
+                            available: false,
+                            text: String::new(),
+                            source: String::new(),
+                        };
+                        if let Ok(mut c) = raw_lyrics_cache().lock() {
+                            c.insert(video_id.to_string(), r);
+                        }
+                        return LyricsResponse {
+                            ok: true,
+                            available: false,
+                            source: String::new(),
+                            is_already_en: false,
+                            lines: Vec::new(),
+                            error: None,
+                        };
                     }
                     return LyricsResponse {
-                        ok: true,
+                        ok: false,
                         available: false,
                         source: String::new(),
                         is_already_en: false,
                         lines: Vec::new(),
-                        error: None,
+                        error: Some(format!("Lyrics ID query failed: {err_msg}")),
                     };
                 }
             };
@@ -366,22 +509,33 @@ pub async fn get_lyrics(video_id: &str, lang_mode: &str) -> LyricsResponse {
                     }
                     r
                 }
-                Err(_) => {
-                    let r = CachedRawLyrics {
-                        available: false,
-                        text: String::new(),
-                        source: String::new(),
-                    };
-                    if let Ok(mut c) = raw_lyrics_cache().lock() {
-                        c.insert(video_id.to_string(), r.clone());
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if matches!(e.into_kind(), ErrorKind::JsonParsing(_)) {
+                        let r = CachedRawLyrics {
+                            available: false,
+                            text: String::new(),
+                            source: String::new(),
+                        };
+                        if let Ok(mut c) = raw_lyrics_cache().lock() {
+                            c.insert(video_id.to_string(), r);
+                        }
+                        return LyricsResponse {
+                            ok: true,
+                            available: false,
+                            source: String::new(),
+                            is_already_en: false,
+                            lines: Vec::new(),
+                            error: None,
+                        };
                     }
                     return LyricsResponse {
-                        ok: true,
+                        ok: false,
                         available: false,
                         source: String::new(),
                         is_already_en: false,
                         lines: Vec::new(),
-                        error: None,
+                        error: Some(format!("Lyrics fetch failed: {err_msg}")),
                     };
                 }
             }
