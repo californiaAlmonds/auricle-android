@@ -1,9 +1,7 @@
 package com.auricle.app.ui.components
 
-import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -29,8 +27,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
-import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.auricle.app.model.SongItem
@@ -44,6 +42,7 @@ fun FeaturedHeroPager(
     items: List<SongItem>,
     onPlayClick: (SongItem) -> Unit,
     onAddToQueueClick: (SongItem) -> Unit,
+    onHeroLongClick: ((SongItem) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty()) return
@@ -69,7 +68,7 @@ fun FeaturedHeroPager(
                 if (!colorCache.containsKey(song.videoId)) {
                     coroutineScope.launch(Dispatchers.IO) {
                         try {
-                            val loader = ImageLoader(context)
+                            val loader = context.imageLoader
                             val request = ImageRequest.Builder(context)
                                 .data(song.displayArtworkUrl)
                                 .allowHardware(false)
@@ -109,13 +108,18 @@ fun FeaturedHeroPager(
                 )
             }
 
+            val cardShape = RoundedCornerShape(20.dp)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(196.dp)
-                    .clip(RoundedCornerShape(20.dp))
+                    .clip(cardShape)
                     .background(brush)
-                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(20.dp))
+                    .border(1.dp, AuricleTheme.colors.borderSoft, cardShape)
+                    .auriclePressClickable(
+                        onClick = { onPlayClick(song) },
+                        onLongClick = onHeroLongClick?.let { cb -> { cb(song) } }
+                    )
                     .padding(18.dp)
             ) {
                 Icon(
@@ -174,9 +178,9 @@ fun FeaturedHeroPager(
                             Box(
                                 modifier = Modifier
                                     .height(36.dp)
-                                    .auriclePressClickable { onPlayClick(song) }
                                     .clip(RoundedCornerShape(18.dp))
                                     .background(AuricleTheme.colors.primaryFill)
+                                    .auriclePressClickable { onPlayClick(song) }
                                     .padding(horizontal = 16.dp),
                                 contentAlignment = Alignment.Center
                             ) {

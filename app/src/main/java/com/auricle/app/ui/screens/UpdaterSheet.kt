@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,7 +112,7 @@ fun UpdaterSheet(
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "You're on ${info.currentVersion} · ${formatMb(info.sizeBytes)}",
+            text = "You're on v${info.currentVersion} · ${formatMb(info.sizeBytes)}",
             style = AuricleTheme.typography.sub,
             fontSize = 13.sp,
             color = AuricleTheme.colors.textMuted
@@ -135,21 +136,28 @@ fun UpdaterSheet(
                 color = AuricleTheme.colors.textPrimary
             )
             Spacer(modifier = Modifier.height(12.dp))
-            info.releaseNotesBullets.take(4).forEach { bullet ->
-                Row(modifier = Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.Top) {
-                    Icon(
-                        imageVector = AuricleIcons.Check,
-                        contentDescription = null,
-                        tint = AuricleTheme.colors.success,
-                        modifier = Modifier.size(16.dp).padding(top = 2.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = bullet,
-                        color = AuricleTheme.colors.textPrimary,
-                        fontSize = 13.sp,
-                        style = AuricleTheme.typography.sub
-                    )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                info.releaseNotesBullets.forEach { bullet ->
+                    Row(modifier = Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.Top) {
+                        Icon(
+                            imageVector = AuricleIcons.Check,
+                            contentDescription = null,
+                            tint = AuricleTheme.colors.success,
+                            modifier = Modifier.size(16.dp).padding(top = 2.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = bullet,
+                            color = AuricleTheme.colors.textPrimary,
+                            fontSize = 13.sp,
+                            style = AuricleTheme.typography.sub
+                        )
+                    }
                 }
             }
         }
@@ -217,24 +225,34 @@ fun UpdaterSheet(
                     onClick = onDownloadClick
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Not now",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = AuricleTheme.colors.textMuted,
-                    modifier = Modifier.clickable { onDismiss() }.padding(8.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Not now",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AuricleTheme.colors.textMuted
+                    )
+                }
             }
             is UpdateState.Downloading -> {
                 val downloaded = updateState.downloadedBytes
                 val total = updateState.totalBytes
                 val etaSecs = updateState.etaSeconds
-                val percent = if (total > 0) (downloaded * 100 / total).toInt() else 0
+                val percent = if (total > 0L) (downloaded * 100 / total).toInt().coerceIn(0, 100) else 0
                 val etaText = if (etaSecs != null) " · ${etaSecs}s left" else ""
-                
+
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Downloading…", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = AuricleTheme.colors.textPrimary)
-                    Text("$percent%", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AuricleTheme.colors.textMuted)
+                    if (total > 0L) {
+                        Text("$percent%", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AuricleTheme.colors.textMuted)
+                    }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Box(
@@ -247,14 +265,19 @@ fun UpdaterSheet(
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
-                            .fillMaxWidth(if (total > 0) downloaded.toFloat() / total.toFloat() else 0f)
+                            .fillMaxWidth(if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f)
                             .clip(RoundedCornerShape(3.dp))
                             .background(Brush.horizontalGradient(listOf(Color(0xFF2FD3A0), Color(0xFF1E8BF0))))
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
+                val progressText = if (total > 0L) {
+                    "${formatMb(downloaded)} of ${formatMb(total)}$etaText"
+                } else {
+                    "${formatMb(downloaded)} downloaded$etaText"
+                }
                 Text(
-                    text = "${formatMb(downloaded)} of ${formatMb(total)}$etaText",
+                    text = progressText,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = AuricleTheme.colors.textMuted
@@ -296,13 +319,21 @@ fun UpdaterSheet(
                     onClick = onInstallClick
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Later",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = AuricleTheme.colors.textMuted,
-                    modifier = Modifier.clickable { onDismiss() }.padding(8.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Later",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AuricleTheme.colors.textMuted
+                    )
+                }
             }
             is UpdateState.Error -> {
                 Column(
@@ -329,13 +360,21 @@ fun UpdaterSheet(
                     onClick = onDownloadClick
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Close",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = AuricleTheme.colors.textMuted,
-                    modifier = Modifier.clickable { onDismiss() }.padding(8.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Close",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AuricleTheme.colors.textMuted
+                    )
+                }
             }
             else -> {}
         }

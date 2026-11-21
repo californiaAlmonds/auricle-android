@@ -5,13 +5,14 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.annotation.Keep
 import androidx.core.content.FileProvider
 import com.auricle.app.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -20,17 +21,68 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
 private fun defaultHttpClient() = OkHttpClient.Builder().build()
+
+@Keep
+@Serializable
+private data class PersistedUpdateInfo(
+    val version: String,
+    val currentVersion: String,
+    val releaseNotesBullets: List<String> = emptyList(),
+    val htmlUrl: String = "",
+    val publishedDateDisplay: String = "",
+    val assetName: String,
+    val downloadUrl: String,
+    val sizeBytes: Long = 0L,
+    val expectedSha256: String? = null
+) {
+    fun toReleaseUpdateInfo(): ReleaseUpdateInfo = ReleaseUpdateInfo(
+        version = version,
+        currentVersion = currentVersion,
+        releaseNotesBullets = releaseNotesBullets,
+        htmlUrl = htmlUrl,
+        publishedDateDisplay = publishedDateDisplay,
+        assetName = assetName,
+        downloadUrl = downloadUrl,
+        sizeBytes = sizeBytes,
+        expectedSha256 = expectedSha256
+    )
+
+    companion object {
+        fun from(info: ReleaseUpdateInfo): PersistedUpdateInfo = PersistedUpdateInfo(
+            version = info.version,
+            currentVersion = info.currentVersion,
+            releaseNotesBullets = info.releaseNotesBullets,
+            htmlUrl = info.htmlUrl,
+            publishedDateDisplay = info.publishedDateDisplay,
+            assetName = info.assetName,
+            downloadUrl = info.downloadUrl,
+            sizeBytes = info.sizeBytes,
+            expectedSha256 = info.expectedSha256
+        )
+    }
+}
+
+@Keep
+@Serializable
+private data class UpdaterPersistedState(
+    val lastCheckMs: Long = 0L,
+    val lastUpdateInfo: PersistedUpdateInfo? = null
+)
 
 class UpdateRepository(
     private val context: Context,
@@ -45,35 +97,119 @@ class UpdateRepository(
         .map { it is UpdateState.Available || it is UpdateState.Ready }
         .stateIn(scope, SharingStarted.Eagerly, false)
 
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = Json {
+        ignoreUnknownKeys = true
+        coerceInputValues = true
+        isLenient = true
+    }
     private val stateFile = File(context.filesDir, "updater_state.json")
     private val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
-    
+    private val stateLock = Any()
+
     private var downloadJob: Job? = null
 
-    suspend fun checkOnLaunchIfDue(autoCheckEnabled: Boolean) {
-        if (!autoCheckEnabled) return
-        val lastCheckMs = withContext(Dispatchers.IO) {
-            if (stateFile.exists()) {
-                try {
-                    val content = stateFile.readText()
-                    // very simple parsing or just storing timestamp
-                    content.toLongOrNull() ?: 0L
-                } catch (e: Exception) { 0L }
-            } else 0L
-        }
-        val now = System.currentTimeMillis()
-        if (now - lastCheckMs >= 24 * 3600 * 1000L) {
-            checkForUpdates(false)
-        } else {
-            // Check if ready apk is sitting in cache for a newer version
-            withContext(Dispatchers.IO) {
-                // Not strictly fully defined how to discover `info`, but we skip for now unless requested
+    private fun readPersistedState(): UpdaterPersistedState {
+        synchronized(stateLock) {
+            if (!stateFile.exists()) return UpdaterPersistedState()
+            return try {
+                val content = stateFile.readText().trim()
+                if (content.isBlank()) {
+                    UpdaterPersistedState()
+                } else {
+                    content.toLongOrNull()?.let { ts ->
+                        UpdaterPersistedState(lastCheckMs = ts)
+                    } ?: json.decodeFromString<UpdaterPersistedState>(content)
+                }
+            } catch (_: Exception) {
+                UpdaterPersistedState()
             }
         }
     }
 
-    suspend fun checkForUpdates(manual: Boolean = true) = withContext(Dispatchers.IO) {
+    private fun writePersistedState(persisted: UpdaterPersistedState) {
+        synchronized(stateLock) {
+            try {
+                val encoded = json.encodeToString(persisted)
+                val parent = stateFile.parentFile
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs()
+                }
+                val tmpFile = File(parent, "${stateFile.name}.tmp")
+                tmpFile.writeText(encoded)
+                try {
+                    Files.move(
+                        tmpFile.toPath(),
+                        stateFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE
+                    )
+                } catch (_: Exception) {
+                    try {
+                        Files.move(
+                            tmpFile.toPath(),
+                            stateFile.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                    } catch (_: Exception) {
+                        if (!tmpFile.renameTo(stateFile)) {
+                            stateFile.writeText(encoded)
+                            tmpFile.delete()
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun findVerifiedCachedApk(info: ReleaseUpdateInfo): File? {
+        if (info.expectedSha256 == null) return null
+        val sanitizedName = info.assetName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val canonicalDir = updatesDir.canonicalFile
+        val apkFile = File(updatesDir, sanitizedName)
+        if (apkFile.canonicalFile.parentFile != canonicalDir) return null
+        return if (apkFile.exists() && verifyFileSha256(apkFile, info.expectedSha256)) apkFile else null
+    }
+
+    suspend fun checkOnLaunchIfDue(autoCheckEnabled: Boolean) {
+        if (!autoCheckEnabled) return
+        if (downloadJob?.isActive == true || _state.value is UpdateState.Downloading) return
+
+        val persisted = withContext(Dispatchers.IO) { readPersistedState() }
+        val now = System.currentTimeMillis()
+        if (now - persisted.lastCheckMs >= 24 * 3600 * 1000L) {
+            checkForUpdates(manual = false)
+        } else {
+            val savedInfo = persisted.lastUpdateInfo?.toReleaseUpdateInfo() ?: return
+            if (!isNewerVersion(savedInfo.version, BuildConfig.VERSION_NAME)) {
+                withContext(Dispatchers.IO) {
+                    writePersistedState(UpdaterPersistedState(lastCheckMs = persisted.lastCheckMs, lastUpdateInfo = null))
+                }
+                return
+            }
+            val parsedUri = Uri.parse(savedInfo.downloadUrl)
+            val urlScheme = parsedUri.scheme?.lowercase() ?: ""
+            val urlHost = parsedUri.host?.lowercase() ?: ""
+            if (urlScheme != "https" || !isAllowedDownloadHost(urlHost) || savedInfo.expectedSha256 == null) {
+                return
+            }
+
+            val cachedApk = withContext(Dispatchers.IO) { findVerifiedCachedApk(savedInfo) }
+            if (cachedApk != null) {
+                _state.value = UpdateState.Ready(savedInfo, cachedApk, true)
+            } else {
+                _state.value = UpdateState.Available(savedInfo)
+            }
+        }
+    }
+
+    suspend fun checkForUpdates(manual: Boolean = true, force: Boolean = false) = withContext(Dispatchers.IO) {
+        if (downloadJob?.isActive == true || _state.value is UpdateState.Downloading) {
+            if (!force) return@withContext
+            downloadJob?.cancel()
+            downloadJob = null
+        }
+
         _state.value = UpdateState.Checking
         try {
             val request = Request.Builder()
@@ -90,8 +226,7 @@ class UpdateRepository(
                 response.body?.string() ?: ""
             }
             val release = json.decodeFromString<GitHubRelease>(bodyStr)
-
-            stateFile.writeText(System.currentTimeMillis().toString())
+            val nowMs = System.currentTimeMillis()
 
             if (!release.draft && !release.prerelease && isNewerVersion(release.tagName, BuildConfig.VERSION_NAME)) {
                 val supportedAbis = Build.SUPPORTED_ABIS.toList()
@@ -99,18 +234,19 @@ class UpdateRepository(
                 if (asset != null) {
                     val expectedSha = parseExpectedSha256(asset.digest).getOrNull()
                     if (expectedSha == null) {
+                        writePersistedState(UpdaterPersistedState(lastCheckMs = nowMs, lastUpdateInfo = null))
                         _state.value = UpdateState.Error("Release asset is missing a valid SHA-256 digest.")
                         return@withContext
                     }
-                    
+
                     val bullets = release.body.lines()
                         .map { it.trim() }
                         .filter { it.startsWith("-") || it.startsWith("*") }
                         .map { it.removePrefix("-").removePrefix("*").trim() }
                         .filter { it.isNotEmpty() }
-                    
+
                     val finalBullets = if (bullets.isEmpty()) listOf("Performance improvements and bug fixes.") else bullets
-                    
+
                     val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
                     val date = try { sdf.parse(release.publishedAt) } catch (e: Exception) { null }
                     val displayDate = if (date != null) {
@@ -128,23 +264,39 @@ class UpdateRepository(
                         sizeBytes = asset.size,
                         expectedSha256 = expectedSha
                     )
-                    
+
                     // Enforce HTTPS host allowlist for download URL!
                     val parsedUri = Uri.parse(info.downloadUrl)
                     val urlScheme = parsedUri.scheme?.lowercase() ?: ""
                     val urlHost = parsedUri.host?.lowercase() ?: ""
                     if (urlScheme != "https" || !isAllowedDownloadHost(urlHost)) {
+                        writePersistedState(UpdaterPersistedState(lastCheckMs = nowMs, lastUpdateInfo = null))
                         _state.value = UpdateState.Error("Invalid download server: $urlHost")
                         return@withContext
                     }
 
-                    _state.value = UpdateState.Available(info)
+                    writePersistedState(
+                        UpdaterPersistedState(
+                            lastCheckMs = nowMs,
+                            lastUpdateInfo = PersistedUpdateInfo.from(info)
+                        )
+                    )
+                    val cachedApk = findVerifiedCachedApk(info)
+                    if (cachedApk != null) {
+                        _state.value = UpdateState.Ready(info, cachedApk, true)
+                    } else {
+                        _state.value = UpdateState.Available(info)
+                    }
                 } else {
+                    writePersistedState(UpdaterPersistedState(lastCheckMs = nowMs, lastUpdateInfo = null))
                     _state.value = UpdateState.Error("No compatible APK found in the latest release.")
                 }
             } else {
+                writePersistedState(UpdaterPersistedState(lastCheckMs = nowMs, lastUpdateInfo = null))
                 _state.value = UpdateState.UpToDate(BuildConfig.VERSION_NAME)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             _state.value = UpdateState.Error(e.localizedMessage ?: "Network error")
         }
@@ -159,24 +311,32 @@ class UpdateRepository(
         }
 
         downloadJob?.cancel()
-        downloadJob = scope.launch(Dispatchers.IO) {
+        val newJob = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val sanitizedName = info.assetName.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val canonicalDir = updatesDir.canonicalFile
             val partFile = File(updatesDir, "$sanitizedName.part")
             val apkFile = File(updatesDir, sanitizedName)
 
             if (partFile.canonicalFile.parentFile != canonicalDir || apkFile.canonicalFile.parentFile != canonicalDir) {
-                _state.value = UpdateState.Error("Path traversal detected", info)
+                if (coroutineContext[Job] === downloadJob) {
+                    _state.value = UpdateState.Error("Path traversal detected", info)
+                }
                 return@launch
             }
 
-            try {
-                val request = Request.Builder()
-                    .url(info.downloadUrl)
-                    .header("User-Agent", "Auricle-Android/${BuildConfig.VERSION_NAME}")
-                    .build()
+            val request = Request.Builder()
+                .url(info.downloadUrl)
+                .header("User-Agent", "Auricle-Android/${BuildConfig.VERSION_NAME}")
+                .build()
+            val call = httpClient.newCall(request)
+            val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+                if (cause != null) {
+                    call.cancel()
+                }
+            }
 
-                val response = httpClient.newCall(request).execute()
+            try {
+                val response = call.execute()
                 response.use { resp ->
                     if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
                     val finalUrl = resp.request.url
@@ -209,7 +369,9 @@ class UpdateRepository(
                                     val speed = if (elapsedSec > 0) downloadedBytes / elapsedSec else 0.0
                                     val eta = if (speed > 0 && totalBytes > 0) ((totalBytes - downloadedBytes) / speed).toLong() else null
 
-                                    _state.value = UpdateState.Downloading(info, downloadedBytes, totalBytes, eta)
+                                    if (coroutineContext[Job] === downloadJob) {
+                                        _state.value = UpdateState.Downloading(info, downloadedBytes, totalBytes, eta)
+                                    }
                                     lastEmitTime = now
                                 }
                                 read = input.read(buffer)
@@ -218,29 +380,46 @@ class UpdateRepository(
                     }
                 }
 
+                ensureActive()
+
                 if (!verifyFileSha256(partFile, info.expectedSha256)) {
-                    partFile.delete()
-                    _state.value = UpdateState.Error("Package checksum verification failed (SHA-256 mismatch). Partial download deleted.", info)
+                    if (coroutineContext[Job] === downloadJob) {
+                        partFile.delete()
+                        _state.value = UpdateState.Error("Package checksum verification failed (SHA-256 mismatch). Partial download deleted.", info)
+                    }
                     return@launch
                 }
+
+                if (coroutineContext[Job] !== downloadJob) return@launch
 
                 if (apkFile.exists()) {
                     apkFile.delete()
                 }
                 if (partFile.renameTo(apkFile)) {
-                    _state.value = UpdateState.Ready(info, apkFile, true)
+                    if (coroutineContext[Job] === downloadJob) {
+                        _state.value = UpdateState.Ready(info, apkFile, true)
+                    }
                 } else {
                     throw Exception("Failed to finalize downloaded package.")
                 }
 
             } catch (e: CancellationException) {
-                partFile.delete()
-                _state.value = UpdateState.Available(info)
+                if (coroutineContext[Job] === downloadJob) {
+                    partFile.delete()
+                    _state.value = UpdateState.Available(info)
+                }
+                throw e
             } catch (e: Exception) {
-                partFile.delete()
-                _state.value = UpdateState.Error(e.localizedMessage ?: "Download failed", info)
+                if (coroutineContext[Job] === downloadJob) {
+                    partFile.delete()
+                    _state.value = UpdateState.Error(e.localizedMessage ?: "Download failed", info)
+                }
+            } finally {
+                cancelHandle?.dispose()
             }
         }
+        downloadJob = newJob
+        newJob.start()
     }
 
     fun cancelDownload() {
@@ -291,13 +470,13 @@ class UpdateRepository(
         fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
             val remote = remoteTag.removePrefix("v")
             val current = currentVersion.removePrefix("v")
-            
+
             val remoteCore = remote.substringBefore('-')
             val currentCore = current.substringBefore('-')
-            
+
             val remoteParts = remoteCore.split('.').mapNotNull { it.toIntOrNull() }
             val currentParts = currentCore.split('.').mapNotNull { it.toIntOrNull() }
-            
+
             val maxLen = maxOf(remoteParts.size, currentParts.size)
             for (i in 0 until maxLen) {
                 val r = remoteParts.getOrElse(i) { 0 }
@@ -305,7 +484,9 @@ class UpdateRepository(
                 if (r > c) return true
                 if (r < c) return false
             }
-            return false
+            val remoteIsPre = remote.contains('-')
+            val currentIsPre = current.contains('-')
+            return currentIsPre && !remoteIsPre
         }
 
         fun selectBestApkAsset(assets: List<GitHubAsset>, version: String, supportedAbis: List<String>): GitHubAsset? {

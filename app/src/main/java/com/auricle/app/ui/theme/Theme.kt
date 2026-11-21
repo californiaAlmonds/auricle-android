@@ -108,7 +108,7 @@ fun AuricleAppTheme(
             primary = auricleColors.accent,
             background = auricleColors.canvas,
             surface = auricleColors.surface,
-            onPrimary = Color.White,
+            onPrimary = auricleColors.onAccent,
             onBackground = auricleColors.textPrimary,
             onSurface = auricleColors.textPrimary
         )
@@ -117,7 +117,7 @@ fun AuricleAppTheme(
             primary = auricleColors.accent,
             background = auricleColors.canvas,
             surface = auricleColors.surface,
-            onPrimary = Color.White,
+            onPrimary = auricleColors.onAccent,
             onBackground = auricleColors.textPrimary,
             onSurface = auricleColors.textPrimary
         )
@@ -132,7 +132,7 @@ fun AuricleAppTheme(
                 window.navigationBarColor = Color.Transparent.toArgb()
                 val insetsController = WindowCompat.getInsetsController(window, view)
                 insetsController.isAppearanceLightStatusBars = if (forceLightStatusBarIcons) false else !isDark
-                insetsController.isAppearanceLightNavigationBars = !isDark
+                insetsController.isAppearanceLightNavigationBars = if (forceLightStatusBarIcons) false else !isDark
             }
         }
     }

@@ -6,7 +6,7 @@ pub mod stream;
 pub mod ytm;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
@@ -14,7 +14,7 @@ use jni::JNIEnv;
 
 static STORAGE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static INIT_GUARD: OnceLock<()> = OnceLock::new();
+static INIT_STATE: Mutex<bool> = Mutex::new(false);
 
 pub fn storage_dir() -> Option<&'static PathBuf> {
     STORAGE_DIR.get()
@@ -56,29 +56,55 @@ pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeInit(
     storage_dir_jstr: JString,
 ) -> jboolean {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        INIT_GUARD.get_or_init(|| {
-            let path_str = get_jstring(&mut env, storage_dir_jstr);
-            if !path_str.is_empty() {
-                let p = PathBuf::from(path_str);
-                let _ = std::fs::create_dir_all(&p);
-                let _ = STORAGE_DIR.set(p);
-            }
+        if context.is_null() {
+            return JNI_FALSE;
+        }
+        let mut initialized = INIT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if *initialized {
+            return JNI_TRUE;
+        }
 
-            // Initialize rustls-platform-verifier on Android via jni 0.22 raw handles
-            #[cfg(target_os = "android")]
-            unsafe {
-                let raw_env = env.get_raw() as *mut jni22::sys::JNIEnv;
-                let raw_ctx = context.as_raw() as jni22::sys::jobject;
-                let mut unowned = jni22::EnvUnowned::from_raw(raw_env);
-                let _ = unowned.with_env(|e22| {
-                    let ctx22 = jni22::objects::JObject::from_raw(e22, raw_ctx);
-                    rustls_platform_verifier::android::init_with_env(e22, ctx22)
-                });
-            }
+        let path_str = get_jstring(&mut env, storage_dir_jstr);
+        if !path_str.is_empty() {
+            let p = PathBuf::from(path_str);
+            let _ = std::fs::create_dir_all(&p);
+            let _ = STORAGE_DIR.set(p);
+        }
 
-            // Load existing stream URL disk cache
-            stream::load_disk_cache();
-        });
+        // Initialize rustls-platform-verifier on Android via jni 0.22 raw handles
+        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+        let mut verifier_ok = true;
+        #[cfg(target_os = "android")]
+        unsafe {
+            let raw_env = env.get_raw() as *mut jni22::sys::JNIEnv;
+            let raw_ctx = context.as_raw() as jni22::sys::jobject;
+            let mut unowned = jni22::EnvUnowned::from_raw(raw_env);
+            let outcome = unowned.with_env(|e22| {
+                let ctx22 = jni22::objects::JObject::from_raw(e22, raw_ctx);
+                let res = rustls_platform_verifier::android::init_with_env(e22, ctx22);
+                if let Err(ref e) = res {
+                    eprintln!(
+                        "[auricle_core] rustls_platform_verifier::android::init_with_env failed: {e}"
+                    );
+                }
+                res
+            });
+            if !matches!(outcome.into_outcome(), jni22::Outcome::Ok(())) {
+                verifier_ok = false;
+            }
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+        }
+
+        if !verifier_ok {
+            return JNI_FALSE;
+        }
+
+        // Load existing stream URL disk cache
+        stream::load_disk_cache();
+        *initialized = true;
         JNI_TRUE
     }));
 
@@ -276,7 +302,7 @@ pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeResolveStream<
     let force = force_refresh == JNI_TRUE;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let resp = rt().block_on(stream::resolve_stream(&vid, force));
+        let resp = rt().block_on(stream::resolve_stream(&vid, force, true));
         serde_json::to_string(&resp).unwrap_or_else(|e| {
             serde_json::json!({ "ok": false, "error": e.to_string() }).to_string()
         })
@@ -287,6 +313,42 @@ pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeResolveStream<
         Err(_) => serde_json::json!({ "ok": false, "error": "panic in nativeResolveStream" }).to_string(),
     };
     to_jstring(&mut env, &json_str)
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeResolveStreamQuality<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    video_id: JString,
+    force_refresh: jboolean,
+    high_quality: jboolean,
+) -> JString<'a> {
+    let vid = get_jstring(&mut env, video_id);
+    let force = force_refresh == JNI_TRUE;
+    let hq = high_quality == JNI_TRUE;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let resp = rt().block_on(stream::resolve_stream(&vid, force, hq));
+        serde_json::to_string(&resp).unwrap_or_else(|e| {
+            serde_json::json!({ "ok": false, "error": e.to_string() }).to_string()
+        })
+    }));
+
+    let json_str = match result {
+        Ok(s) => s,
+        Err(_) => serde_json::json!({ "ok": false, "error": "panic in nativeResolveStreamQuality" }).to_string(),
+    };
+    to_jstring(&mut env, &json_str)
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeClearStreamCache(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stream::clear_stream_cache();
+    }));
 }
 
 #[no_mangle]

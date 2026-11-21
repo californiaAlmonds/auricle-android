@@ -28,6 +28,8 @@ object AuricleNative {
     external fun nativeGetPlaylist(playlistId: String): String
     external fun nativeGetLyrics(videoId: String, langMode: String): String
     external fun nativeResolveStream(videoId: String, forceRefresh: Boolean): String
+    external fun nativeResolveStreamQuality(videoId: String, forceRefresh: Boolean, highQuality: Boolean): String
+    external fun nativeClearStreamCache()
 
     external fun nativePartyStart(displayName: String, initialStateJson: String): String
     external fun nativePartyJoin(inviteInput: String, displayName: String): String

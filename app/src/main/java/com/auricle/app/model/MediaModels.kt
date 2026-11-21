@@ -40,7 +40,7 @@ data class AlbumItem(
     @SerialName("artist") @JsonNames("artist", "subtitle") val artist: String = "",
     val year: String = "",
     @SerialName("thumbnail_url") val thumbnailUrl: String = "",
-    @SerialName("item_type") val itemType: String = "album",
+    @SerialName("item_type") @JsonNames("kind") val itemType: String = "album",
     val description: String? = null,
     val tracks: List<SongItem> = emptyList()
 )
@@ -107,7 +107,8 @@ data class LyricsData(
     val available: Boolean = false,
     val source: String = "",
     @SerialName("is_already_en") val isAlreadyEn: Boolean = false,
-    val lines: List<LyricsLine> = emptyList()
+    val lines: List<LyricsLine> = emptyList(),
+    val error: String = ""
 )
 
 @Serializable
@@ -117,5 +118,6 @@ data class StreamResolutionResult(
     @SerialName("is_hls") val isHls: Boolean = false,
     @SerialName("expires_at") val expiresAt: Long? = null,
     @SerialName("format_id") val formatId: String? = null,
+    @SerialName("duration_secs") val durationSecs: Long = 0L,
     val error: String? = null
 )

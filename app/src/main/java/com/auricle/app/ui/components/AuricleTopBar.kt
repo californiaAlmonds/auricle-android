@@ -4,8 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -13,15 +13,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.auricle.app.model.PartySnapshot
@@ -133,7 +134,8 @@ fun AuricleCollapsibleHeader(
 fun AuricleCollapsedTopBar(
     title: String,
     visible: Boolean,
-    actions: @Composable RowScope.() -> Unit
+    navigationIcon: (@Composable () -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit = {}
 ) {
     AnimatedVisibility(
         visible = visible,
@@ -148,6 +150,10 @@ fun AuricleCollapsedTopBar(
                     fallbackColor = AuricleTheme.colors.tabBarGlass,
                     borderColor = Color.Transparent
                 )
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {}
         ) {
             Row(
                 modifier = Modifier
@@ -155,14 +161,21 @@ fun AuricleCollapsedTopBar(
                     .statusBarsPadding()
                     .height(56.dp)
                     .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                if (navigationIcon != null) {
+                    navigationIcon()
+                    Spacer(Modifier.width(8.dp))
+                }
                 Text(
                     text = title,
                     style = AuricleTheme.typography.headline,
                     color = AuricleTheme.colors.textPrimary,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp)
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     actions()
