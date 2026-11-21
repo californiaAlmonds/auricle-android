@@ -13,8 +13,8 @@ android {
         applicationId = "com.auricle.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.4.0-RC"
+        versionCode = 4
+        versionName = "0.4.0-RC2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

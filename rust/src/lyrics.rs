@@ -90,7 +90,7 @@ fn translate_client() -> &'static reqwest::Client {
 fn synced_http_client() -> &'static reqwest::Client {
     SYNCED_HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("Auricle/0.4.0-RC (https://github.com/californiaAlmonds/auricle-android)")
+            .user_agent("Auricle/0.4.0-RC2 (https://github.com/californiaAlmonds/auricle-android)")
             .http2_max_header_list_size(64 * 1024)
             .connect_timeout(Duration::from_secs(4))
             .timeout(Duration::from_secs(6))
