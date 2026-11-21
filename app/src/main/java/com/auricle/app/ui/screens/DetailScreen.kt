@@ -487,7 +487,7 @@ private fun ArtistDetailContent(
                                     isPlaying = currentPlayingTrack?.videoId == song.videoId,
                                     isActivelyPlaying = isPlaying,
                                     onClick = {
-                                        playbackController.playTrack(song, artist.topSongs, artist.name)
+                                        playbackController.playTrack(song, listOf(song), artist.name)
                                     },
                                     onQuickAddQueue = {
                                         playbackController.addToQueue(song)

@@ -127,6 +127,7 @@ fun SearchScreen(
     val settings by settingsRepo.settings.collectAsState()
     val currentPlayingTrack by playbackController.currentTrack.collectAsState()
     val isPlaying by playbackController.isPlaying.collectAsState()
+    val isTrackLoading by playbackController.isLoading.collectAsState()
 
     val searchPrefs = remember(context) {
         context.getSharedPreferences(SEARCH_PREFS_NAME, Context.MODE_PRIVATE)
@@ -1039,20 +1040,24 @@ fun SearchScreen(
                                                             }
                                                             else -> {
                                                                 val topSong = top.toSongItem()
+                                                                val isCurrentTrack = topSong.videoId.isNotBlank() &&
+                                                                    currentPlayingTrack?.videoId == topSong.videoId
                                                                 TopSongResultCard(
                                                                     song = topSong,
+                                                                    isCurrentTrack = isCurrentTrack,
+                                                                    isActivelyPlaying = isCurrentTrack && isPlaying,
+                                                                    isLoading = isCurrentTrack && isTrackLoading,
                                                                     onPlay = {
                                                                         commitSearchInteraction()
-                                                                        val playQueue = if (res.songs.any { it.videoId == topSong.videoId }) {
-                                                                            res.songs
-                                                                        } else {
-                                                                            listOf(topSong) + res.songs
-                                                                        }
                                                                         playbackController.playTrack(
                                                                             topSong,
-                                                                            playQueue,
+                                                                            listOf(topSong),
                                                                             "Search"
                                                                         )
+                                                                    },
+                                                                    onTogglePlayPause = {
+                                                                        commitSearchInteraction()
+                                                                        playbackController.togglePlayPause()
                                                                     },
                                                                     onMoreOptions = {
                                                                         commitSearchInteraction()
@@ -1116,7 +1121,7 @@ fun SearchScreen(
                                                             isActivelyPlaying = isPlaying,
                                                             onClick = {
                                                                 commitSearchInteraction()
-                                                                playbackController.playTrack(song, res.songs, "Search Results")
+                                                                playbackController.playTrack(song, listOf(song), "Search Results")
                                                             },
                                                             onQuickAddQueue = {
                                                                 commitSearchInteraction()
@@ -1530,10 +1535,19 @@ private fun TopEntityResultCard(
 @Composable
 private fun TopSongResultCard(
     song: SongItem,
+    isCurrentTrack: Boolean,
+    isActivelyPlaying: Boolean,
+    isLoading: Boolean = false,
     onPlay: () -> Unit,
+    onTogglePlayPause: () -> Unit,
     onMoreOptions: () -> Unit
 ) {
     val context = LocalContext.current
+    val primaryAction: () -> Unit = when {
+        isCurrentTrack && isLoading -> ({})
+        isCurrentTrack -> onTogglePlayPause
+        else -> onPlay
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1542,7 +1556,7 @@ private fun TopSongResultCard(
             .background(AuricleTheme.colors.surface2)
             .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
             .auriclePressClickable(
-                onClick = onPlay,
+                onClick = primaryAction,
                 onLongClick = onMoreOptions,
                 onLongClickLabel = "More options"
             )
@@ -1579,7 +1593,7 @@ private fun TopSongResultCard(
             Text(
                 text = song.title,
                 style = AuricleTheme.typography.title2,
-                color = AuricleTheme.colors.textPrimary,
+                color = if (isCurrentTrack) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1617,14 +1631,31 @@ private fun TopSongResultCard(
             )
         }
         Spacer(Modifier.width(4.dp))
-        AuricleCircleIconButton(
-            icon = AuricleIcons.Play,
-            contentDescription = "Play",
-            size = 44.dp,
-            iconSize = 18.dp,
-            containerColor = AuricleTheme.colors.primaryFill,
-            tint = AuricleTheme.colors.onPrimaryFill,
-            onClick = onPlay
-        )
+        if (isCurrentTrack && isLoading) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(AuricleTheme.colors.primaryFill)
+                    .semantics { contentDescription = "Loading" },
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = AuricleTheme.colors.onPrimaryFill,
+                    strokeWidth = 2.dp
+                )
+            }
+        } else {
+            AuricleCircleIconButton(
+                icon = if (isCurrentTrack && isActivelyPlaying) AuricleIcons.Pause else AuricleIcons.Play,
+                contentDescription = if (isCurrentTrack && isActivelyPlaying) "Pause" else "Play",
+                size = 44.dp,
+                iconSize = 18.dp,
+                containerColor = AuricleTheme.colors.primaryFill,
+                tint = AuricleTheme.colors.onPrimaryFill,
+                onClick = primaryAction
+            )
+        }
     }
 }

@@ -297,6 +297,10 @@ fun OnArtQueueRow(
             .fillMaxWidth()
             .height(56.dp)
             .padding(horizontal = if (isDragging) 8.dp else 0.dp)
+            .auriclePressClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .clip(rowShape)
             .background(if (isDragging) Color.White.copy(alpha = 0.16f) else Color.Transparent)
             .then(
@@ -305,10 +309,6 @@ fun OnArtQueueRow(
                 } else {
                     Modifier
                 }
-            )
-            .auriclePressClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
             )
     ) {
         Row(
@@ -365,8 +365,8 @@ fun OnArtQueueRow(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
-                        .clip(RoundedCornerShape(10.dp))
                         .auriclePressClickable(onClick = onRemove)
+                        .clip(RoundedCornerShape(10.dp))
                         .semantics {
                             contentDescription = if (isAutoplay) {
                                 "Remove ${song.title} from autoplay"

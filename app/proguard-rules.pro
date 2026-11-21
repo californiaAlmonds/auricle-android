@@ -27,6 +27,7 @@
 -keep class com.auricle.app.data.*Wrapper$* { *; }
 -keep class com.auricle.app.data.*Wrapper { *; }
 -keep class com.auricle.app.updater.** { *; }
+-keep class com.auricle.app.playback.*State** { *; }
 
 # OkHttp & Okio
 -dontwarn okhttp3.**

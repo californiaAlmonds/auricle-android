@@ -439,7 +439,7 @@ fun HomeScreen(
                                 onPlayClick = { song ->
                                     playbackController.playTrack(
                                         song = song,
-                                        newQueue = trendingDisplay.ifEmpty { feed.trending }.ifEmpty { listOf(song) },
+                                        newQueue = listOf(song),
                                         sourceLabel = "Featured Pick"
                                     )
                                 },
@@ -473,7 +473,7 @@ fun HomeScreen(
                                             subtitle = song.artist.ifBlank { "YouTube Music" },
                                             artworkUrl = song.displayArtworkUrl,
                                             onClick = {
-                                                playbackController.playTrack(song, trendingDisplay, "Trending Now")
+                                                playbackController.playTrack(song, listOf(song), "Trending Now")
                                             },
                                             onLongClick = { onSongOptionsClick(song) },
                                             width = 160.dp
@@ -490,14 +490,6 @@ fun HomeScreen(
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 AuricleSectionHeader(
                                     title = "Quick Picks",
-                                    actionText = "Play all",
-                                    onActionClick = {
-                                        playbackController.playTrack(
-                                            feed.quickPicks.first(),
-                                            feed.quickPicks,
-                                            "Quick Picks"
-                                        )
-                                    },
                                     modifier = Modifier.padding(horizontal = 20.dp)
                                 )
 
@@ -524,7 +516,7 @@ fun HomeScreen(
                                                     onClick = {
                                                         playbackController.playTrack(
                                                             song,
-                                                            feed.quickPicks,
+                                                            listOf(song),
                                                             "Quick Picks"
                                                         )
                                                     },
@@ -569,7 +561,7 @@ fun HomeScreen(
                                             onClick = {
                                                 playbackController.playTrack(
                                                     song,
-                                                    followedSongs,
+                                                    listOf(song),
                                                     recommendedTitle
                                                 )
                                             },
