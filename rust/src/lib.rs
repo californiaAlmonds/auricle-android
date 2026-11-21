@@ -1,7 +1,9 @@
 //! `auricle_core` cdylib: JNI bridge and runtime for Auricle Android.
 
 pub mod lyrics;
+pub mod menu_metadata;
 pub mod party;
+pub mod release_rank;
 pub mod stream;
 pub mod ytm;
 
@@ -9,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 
 static STORAGE_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -287,6 +289,79 @@ pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeGetLyrics<'a>(
     let json_str = match result {
         Ok(s) => s,
         Err(_) => serde_json::json!({ "ok": false, "error": "panic in nativeGetLyrics" }).to_string(),
+    };
+    to_jstring(&mut env, &json_str)
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeGetLyricsSynced<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    video_id: JString,
+    title: JString,
+    artist: JString,
+    album: JString,
+    duration_secs: jint,
+    lang_mode: JString,
+) -> JString<'a> {
+    let vid = get_jstring(&mut env, video_id);
+    let t = get_jstring(&mut env, title);
+    let ar = get_jstring(&mut env, artist);
+    let al = get_jstring(&mut env, album);
+    let dur = duration_secs.max(0) as u32;
+    let mode = get_jstring(&mut env, lang_mode);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let resp = rt().block_on(lyrics::get_lyrics_synced(&vid, &t, &ar, &al, dur, &mode));
+        serde_json::to_string(&resp).unwrap_or_else(|e| {
+            serde_json::json!({ "ok": false, "error": e.to_string() }).to_string()
+        })
+    }));
+
+    let json_str = match result {
+        Ok(s) => s,
+        Err(_) => serde_json::json!({ "ok": false, "error": "panic in nativeGetLyricsSynced" }).to_string(),
+    };
+    to_jstring(&mut env, &json_str)
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_auricle_app_bridge_AuricleNative_nativeResolveArtists<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    kind: JString,
+    id: JString,
+    artist_text: JString,
+) -> JString<'a> {
+    let k = get_jstring(&mut env, kind);
+    let item_id = get_jstring(&mut env, id);
+    let fallback_text = get_jstring(&mut env, artist_text);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match rt().block_on(menu_metadata::resolve_artists(&k, &item_id, &fallback_text)) {
+            Ok(artists) => serde_json::json!({
+                "ok": true,
+                "artists": artists,
+                "error": serde_json::Value::Null
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({
+                "ok": false,
+                "artists": [],
+                "error": e
+            })
+            .to_string(),
+        }
+    }));
+
+    let json_str = match result {
+        Ok(s) => s,
+        Err(_) => serde_json::json!({
+            "ok": false,
+            "artists": [],
+            "error": "panic in nativeResolveArtists"
+        })
+        .to_string(),
     };
     to_jstring(&mut env, &json_str)
 }

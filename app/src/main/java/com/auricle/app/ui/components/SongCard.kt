@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -19,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.auricle.app.model.SongItem
+import com.auricle.app.model.upgradeArtworkUrl
 import com.auricle.app.ui.theme.AuricleTheme
 
 @Composable
@@ -32,24 +34,40 @@ fun AlbumCard(
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val resolvedUrl = remember(artworkUrl) { upgradeArtworkUrl(artworkUrl, 544) }
+
     Column(
         modifier = modifier
             .width(width)
             .auriclePressClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(artworkUrl)
-                .crossfade(true)
-                .build(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+        Box(
             modifier = artworkModifier
                 .size(width)
                 .clip(RoundedCornerShape(10.dp))
                 .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(10.dp))
-                .background(AuricleTheme.colors.surface2)
-        )
+                .background(AuricleTheme.colors.surface2),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.Music,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textDim.copy(alpha = 0.45f),
+                modifier = Modifier.size(32.dp)
+            )
+            if (resolvedUrl.isNotBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(resolvedUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             text = title,
@@ -95,25 +113,41 @@ fun ArtistCircleCard(
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val resolvedUrl = remember(artworkUrl) { upgradeArtworkUrl(artworkUrl, 544) }
+
     Column(
         modifier = modifier
             .width(size)
             .auriclePressClickable(onClick = onClick, onLongClick = onLongClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(artworkUrl)
-                .crossfade(true)
-                .build(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+        Box(
             modifier = Modifier
                 .size(size)
                 .clip(CircleShape)
                 .border(1.dp, AuricleTheme.colors.borderSoft, CircleShape)
-                .background(AuricleTheme.colors.surface2)
-        )
+                .background(AuricleTheme.colors.surface2),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.Artist,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textDim.copy(alpha = 0.5f),
+                modifier = Modifier.size(size * 0.36f)
+            )
+            if (resolvedUrl.isNotBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(resolvedUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             text = name,
@@ -132,6 +166,11 @@ fun PlaylistCollageArt(
     cornerRadius: Dp = 8.dp,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val resolvedUrls = remember(artworkUrls) {
+        artworkUrls.map { upgradeArtworkUrl(it, 544) }.filter { it.isNotBlank() }
+    }
+
     Box(
         modifier = modifier
             .size(size)
@@ -139,17 +178,23 @@ fun PlaylistCollageArt(
             .background(AuricleTheme.colors.surface2),
         contentAlignment = Alignment.Center
     ) {
-        if (artworkUrls.isEmpty()) {
+        if (resolvedUrls.isEmpty()) {
             Icon(
                 imageVector = AuricleIcons.Music,
                 contentDescription = null,
                 tint = AuricleTheme.colors.textMuted,
                 modifier = Modifier.size(size / 2)
             )
-        } else if (artworkUrls.size < 4) {
+        } else if (resolvedUrls.size < 4) {
+            Icon(
+                imageVector = AuricleIcons.Music,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textDim.copy(alpha = 0.45f),
+                modifier = Modifier.size(size * 0.42f)
+            )
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(artworkUrls.first())
+                model = ImageRequest.Builder(context)
+                    .data(resolvedUrls.first())
                     .crossfade(true)
                     .build(),
                 contentDescription = null,
@@ -159,34 +204,41 @@ fun PlaylistCollageArt(
         } else {
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(modifier = Modifier.weight(1f)) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current).data(artworkUrls[0]).crossfade(true).build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current).data(artworkUrls[1]).crossfade(true).build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
+                    CollageCell(url = resolvedUrls[0], modifier = Modifier.weight(1f).fillMaxHeight())
+                    CollageCell(url = resolvedUrls[1], modifier = Modifier.weight(1f).fillMaxHeight())
                 }
                 Row(modifier = Modifier.weight(1f)) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current).data(artworkUrls[2]).crossfade(true).build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current).data(artworkUrls[3]).crossfade(true).build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
+                    CollageCell(url = resolvedUrls[2], modifier = Modifier.weight(1f).fillMaxHeight())
+                    CollageCell(url = resolvedUrls[3], modifier = Modifier.weight(1f).fillMaxHeight())
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CollageCell(
+    url: String,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.background(AuricleTheme.colors.surface2),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = AuricleIcons.Music,
+            contentDescription = null,
+            tint = AuricleTheme.colors.textDim.copy(alpha = 0.35f),
+            modifier = Modifier.size(12.dp)
+        )
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(url)
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }

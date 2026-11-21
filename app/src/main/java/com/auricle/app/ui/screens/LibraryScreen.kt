@@ -159,7 +159,7 @@ private fun SavedPlaylistRow(
         val artUrls = if (playlist.tracks.isNotEmpty()) {
             playlist.tracks.map { it.displayArtworkUrl }.filter { it.isNotBlank() }
         } else {
-            listOfNotNull(playlist.thumbnailUrl.takeIf { it.isNotBlank() })
+            listOfNotNull(playlist.displayThumbnailUrl.takeIf { it.isNotBlank() })
         }
         PlaylistCollageArt(
             artworkUrls = artUrls,
@@ -687,8 +687,7 @@ fun LibraryScreen(
                         item(key = "all-playlists-header") {
                             AuricleSectionHeader(
                                 title = "Playlists",
-                                actionText = "New playlist",
-                                onActionClick = { showCreateDialog = true },
+                                showChevron = false,
                                 modifier = Modifier
                                     .padding(horizontal = 20.dp)
                                     .padding(bottom = 4.dp)
@@ -719,9 +718,9 @@ fun LibraryScreen(
                             )
                         }
 
-                        if (filterQuery.isBlank()) {
+                        if (filterQuery.isBlank() && libraryState.playlists.isEmpty()) {
                             item(key = "all-new-playlist-row") {
-                                // "New Playlist" Action Row
+                                // "New Playlist" Action Row (shown only when user has no custom playlists yet)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -785,7 +784,7 @@ fun LibraryScreen(
                                     ) { _, artist ->
                                         ArtistCircleCard(
                                             name = artist.name,
-                                            artworkUrl = artist.thumbnailUrl,
+                                            artworkUrl = artist.displayThumbnailUrl,
                                             onClick = { onArtistClick(artist) },
                                             onLongClick = onArtistLongClick?.let { cb -> { cb(artist) } },
                                             size = 96.dp
@@ -820,7 +819,7 @@ fun LibraryScreen(
                                         AlbumCard(
                                             title = album.title,
                                             subtitle = album.artist,
-                                            artworkUrl = album.thumbnailUrl,
+                                            artworkUrl = album.displayThumbnailUrl,
                                             onClick = { onAlbumClick(album) },
                                             onLongClick = onAlbumLongClick?.let { cb -> { cb(album) } },
                                             width = 160.dp,
@@ -902,7 +901,7 @@ fun LibraryScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 40.dp),
+                                    .padding(top = 8.dp, bottom = 32.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 AuricleStateCard(
@@ -1043,7 +1042,7 @@ fun LibraryScreen(
                                 rowArtists.forEach { artist ->
                                     ArtistCircleCard(
                                         name = artist.name,
-                                        artworkUrl = artist.thumbnailUrl,
+                                        artworkUrl = artist.displayThumbnailUrl,
                                         onClick = { onArtistClick(artist) },
                                         onLongClick = onArtistLongClick?.let { cb -> { cb(artist) } },
                                         size = 100.dp,
@@ -1103,7 +1102,7 @@ fun LibraryScreen(
                                     AlbumCard(
                                         title = album.title,
                                         subtitle = album.artist,
-                                        artworkUrl = album.thumbnailUrl,
+                                        artworkUrl = album.displayThumbnailUrl,
                                         onClick = { onAlbumClick(album) },
                                         onLongClick = onAlbumLongClick?.let { cb -> { cb(album) } },
                                         modifier = Modifier.weight(1f),

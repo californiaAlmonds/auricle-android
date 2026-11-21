@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -20,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -33,6 +35,7 @@ import com.auricle.app.model.HomeFeedData
 import com.auricle.app.model.PartySnapshot
 import com.auricle.app.model.PlaylistItem
 import com.auricle.app.model.SongItem
+import com.auricle.app.model.splitArtistCredits
 import com.auricle.app.playback.PlaybackController
 import com.auricle.app.ui.components.*
 import com.auricle.app.ui.theme.AuricleTheme
@@ -46,6 +49,17 @@ private fun artistMatchesName(trackArtist: String, targetName: String): Boolean 
     val tokens = trackArtist.split(",", "&", "•", "feat.", "ft.", ignoreCase = true)
     return tokens.any { it.trim().equals(targetName.trim(), ignoreCase = true) }
 }
+
+private fun songMatchesArtistName(song: SongItem, targetName: String): Boolean {
+    if (targetName.isBlank()) return false
+    if (artistMatchesName(song.artist, targetName)) return true
+    return song.parsedArtistCredits().any { it.name.trim().equals(targetName.trim(), ignoreCase = true) }
+}
+
+private data class PersonalizedHomeSection(
+    val songs: List<SongItem>,
+    val hasPersonalArtistMatches: Boolean
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,12 +78,16 @@ fun HomeScreen(
     onPlaylistClick: ((PlaylistItem) -> Unit)? = null,
     onPlaylistLongClick: ((PlaylistItem) -> Unit)? = null,
     albumArtworkModifier: @Composable (String) -> Modifier = { Modifier },
+    listState: LazyListState = rememberLazyListState(),
     bottomContentPadding: Dp = 156.dp,
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
-    var homeFeed by remember { mutableStateOf<HomeFeedData?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    val density = LocalDensity.current
+
+    val cachedHomeFeed by musicRepo.cachedHomeFeed.collectAsState()
+    var homeFeed by remember { mutableStateOf(cachedHomeFeed) }
+    var isLoading by remember { mutableStateOf(cachedHomeFeed == null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var loadJob by remember { mutableStateOf<Job?>(null) }
@@ -78,11 +96,19 @@ fun HomeScreen(
     val isPlaying by playbackController.isPlaying.collectAsState()
     val libraryState by libraryRepo.state.collectAsState()
 
-    val listState = rememberLazyListState()
     val pullToRefreshState = rememberPullToRefreshState()
-    val isCollapsed by remember {
+    val collapseThresholdPx = remember(density) { with(density) { 40.dp.toPx() } }
+    val isCollapsed by remember(listState, collapseThresholdPx) {
         derivedStateOf {
-            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 72
+            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > collapseThresholdPx
+        }
+    }
+
+    LaunchedEffect(cachedHomeFeed) {
+        val latest = cachedHomeFeed
+        if (latest != null) {
+            homeFeed = latest
+            isLoading = false
         }
     }
 
@@ -91,12 +117,14 @@ fun HomeScreen(
             if (isRefreshing) return
             isRefreshing = true
         } else {
-            isLoading = true
+            if (homeFeed == null) {
+                isLoading = true
+            }
         }
         errorMessage = null
         loadJob?.cancel()
         loadJob = coroutineScope.launch {
-            val result = musicRepo.getHomeFeed()
+            val result = musicRepo.getHomeFeed(forceRefresh = isPullRefresh)
             result.onSuccess { data ->
                 homeFeed = data
                 isLoading = false
@@ -110,7 +138,9 @@ fun HomeScreen(
     }
 
     LaunchedEffect(Unit) {
-        loadHomeFeed(isPullRefresh = false)
+        if (cachedHomeFeed == null) {
+            loadHomeFeed(isPullRefresh = false)
+        }
     }
 
     @Composable
@@ -231,12 +261,40 @@ fun HomeScreen(
             } else {
                 val feed = homeFeed ?: HomeFeedData()
                 val heroItems = remember(feed) {
-                    val raw = listOfNotNull(feed.featured) + feed.trending.take(4)
-                    val seen = mutableSetOf<String>()
-                    raw.filter { seen.add(it.videoId) }.take(4)
+                    val raw = listOfNotNull(feed.featured) +
+                        feed.trending.filter { it.videoId != feed.featured?.videoId }.take(2) +
+                        feed.quickPicks.take(3)
+                    val seenIds = mutableSetOf<String>()
+                    val seenTitles = mutableSetOf<String>()
+                    raw.filter { song ->
+                        val vidOk = song.videoId.isBlank() || seenIds.add(song.videoId)
+                        val titleKey = song.title.trim().lowercase()
+                        val titleOk = titleKey.isBlank() || seenTitles.add(titleKey)
+                        vidOk && titleOk
+                    }.take(4)
                 }
-                val followedSongs = remember(libraryState, feed) {
-                    val pool = feed.quickPicks + feed.trending
+
+                val heroLead = heroItems.firstOrNull()
+                val trendingDisplay = remember(feed.trending, heroLead) {
+                    val leadId = heroLead?.videoId
+                    val leadTitle = heroLead?.title?.trim()?.lowercase()
+                    val deduped = feed.trending.filterNot { song ->
+                        (!leadId.isNullOrBlank() && song.videoId == leadId) ||
+                            (!leadTitle.isNullOrBlank() && song.title.trim().lowercase() == leadTitle)
+                    }
+                    deduped.ifEmpty { feed.trending }
+                }
+
+                val hasPersonalHistory = remember(libraryState) {
+                    libraryState.followedArtists.isNotEmpty() ||
+                        libraryState.likedSongs.isNotEmpty() ||
+                        libraryState.recentlyPlayed.isNotEmpty() ||
+                        libraryState.savedAlbums.isNotEmpty()
+                }
+
+                val personalizedSection = remember(libraryState, feed, heroItems) {
+                    val heroIds = heroItems.mapNotNull { it.videoId.takeIf(String::isNotBlank) }.toSet()
+                    val pool = (feed.quickPicks + feed.trending).distinctBy { it.videoId }
                     val followedArtists = libraryState.followedArtists
                     val followedIds = followedArtists
                         .mapNotNull { it.browseId.trim().takeIf(String::isNotBlank) }
@@ -247,37 +305,60 @@ fun HomeScreen(
                     val matchedFollowed = if (followedArtists.isNotEmpty()) {
                         pool.filter { song ->
                             (song.artistId.isNotBlank() && song.artistId in followedIds) ||
-                                followedNames.any { name -> artistMatchesName(song.artist, name) }
+                                song.parsedArtistCredits().any { it.browseId.isNotBlank() && it.browseId in followedIds } ||
+                                followedNames.any { name -> songMatchesArtistName(song, name) }
                         }
                     } else emptyList()
 
-                    if (matchedFollowed.isNotEmpty()) {
-                        matchedFollowed.distinctBy { it.videoId }
-                    } else {
-                        val libraryArtists = (libraryState.likedSongs.map { it.artist } +
-                                libraryState.recentlyPlayed.map { it.track.artist })
-                            .map { it.trim() }
-                            .filter { it.isNotBlank() }
-                            .distinctBy { it.lowercase() }
+                    val libraryArtists = (libraryState.likedSongs.map { it.artist } +
+                            libraryState.recentlyPlayed.map { it.track.artist } +
+                            libraryState.savedAlbums.map { it.artist })
+                        .flatMap { splitArtistCredits(it).map { credit -> credit.name } }
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .distinctBy { it.lowercase() }
 
-                        val matchedDerived = if (libraryArtists.isNotEmpty()) {
-                            pool.filter { song ->
-                                libraryArtists.any { name -> artistMatchesName(song.artist, name) }
-                            }
-                        } else emptyList()
+                    val matchedDerived = if (libraryArtists.isNotEmpty()) {
+                        pool.filter { song ->
+                            libraryArtists.any { name -> songMatchesArtistName(song, name) }
+                        }
+                    } else emptyList()
 
-                        val fallback = (feed.quickPicks.drop(4) + feed.trending.drop(4))
-                            .distinctBy { it.artist }
-                            .take(6)
-                        if (matchedDerived.isNotEmpty()) {
-                            (matchedDerived + fallback)
-                                .distinctBy { it.videoId }
-                                .take(maxOf(6, matchedDerived.size))
-                        } else {
-                            fallback
+                    val fallback = (feed.quickPicks.drop(4) + feed.trending.drop(4))
+                        .ifEmpty { feed.quickPicks + feed.trending }
+                        .filterNot { it.videoId in heroIds }
+                        .distinctBy { it.videoId }
+                        .distinctBy { it.artist.trim().lowercase().ifBlank { it.videoId } }
+                        .take(8)
+
+                    when {
+                        matchedFollowed.isNotEmpty() -> {
+                            PersonalizedHomeSection(
+                                songs = matchedFollowed.distinctBy { it.videoId },
+                                hasPersonalArtistMatches = true
+                            )
+                        }
+                        matchedDerived.isNotEmpty() -> {
+                            PersonalizedHomeSection(
+                                songs = (matchedDerived + fallback)
+                                    .distinctBy { it.videoId }
+                                    .take(maxOf(6, matchedDerived.size)),
+                                hasPersonalArtistMatches = true
+                            )
+                        }
+                        else -> {
+                            PersonalizedHomeSection(
+                                songs = fallback,
+                                hasPersonalArtistMatches = followedArtists.isNotEmpty() && matchedFollowed.isNotEmpty()
+                            )
                         }
                     }
                 }
+
+                val hasPersonalArtistMatches = personalizedSection.hasPersonalArtistMatches
+                val recommendedTitle = if (hasPersonalArtistMatches) "From artists you follow" else "Recommended for You"
+                val recommendedGlyph = if (hasPersonalArtistMatches) AuricleIcons.Heart else AuricleIcons.Sparkles
+                val followedSongs = personalizedSection.songs
 
                 LazyColumn(
                     state = listState,
@@ -354,10 +435,11 @@ fun HomeScreen(
                         item(key = "home-hero") {
                             FeaturedHeroPager(
                                 items = heroItems,
+                                eyebrowText = if (hasPersonalHistory) "MADE FOR YOUR TASTE" else "FEATURED PICK",
                                 onPlayClick = { song ->
                                     playbackController.playTrack(
                                         song = song,
-                                        newQueue = feed.trending.ifEmpty { listOf(song) },
+                                        newQueue = trendingDisplay.ifEmpty { feed.trending }.ifEmpty { listOf(song) },
                                         sourceLabel = "Featured Pick"
                                     )
                                 },
@@ -370,7 +452,7 @@ fun HomeScreen(
                     }
 
                     // 2. Trending Now Section
-                    if (feed.trending.isNotEmpty()) {
+                    if (trendingDisplay.isNotEmpty()) {
                         item(key = "home-trending") {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 AuricleSectionHeader(
@@ -383,15 +465,15 @@ fun HomeScreen(
                                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
                                     itemsIndexed(
-                                        items = feed.trending,
+                                        items = trendingDisplay,
                                         key = { idx, item -> "trending-${item.videoId}-$idx" }
                                     ) { _, song ->
                                         AlbumCard(
-                                            title = song.title,
-                                            subtitle = song.artist,
+                                            title = song.title.ifBlank { "Untitled Track" },
+                                            subtitle = song.artist.ifBlank { "YouTube Music" },
                                             artworkUrl = song.displayArtworkUrl,
                                             onClick = {
-                                                playbackController.playTrack(song, feed.trending, "Trending Now")
+                                                playbackController.playTrack(song, trendingDisplay, "Trending Now")
                                             },
                                             onLongClick = { onSongOptionsClick(song) },
                                             width = 160.dp
@@ -462,13 +544,13 @@ fun HomeScreen(
                         }
                     }
 
-                    // 4. From artists you follow
+                    // 4. From artists you follow / Recommended for You
                     if (followedSongs.isNotEmpty()) {
                         item(key = "home-followed") {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 AuricleSectionHeader(
-                                    title = "From artists you follow",
-                                    glyph = AuricleIcons.Heart,
+                                    title = recommendedTitle,
+                                    glyph = recommendedGlyph,
                                     modifier = Modifier.padding(horizontal = 20.dp)
                                 )
 
@@ -481,14 +563,14 @@ fun HomeScreen(
                                         key = { idx, item -> "followed-${item.videoId}-$idx" }
                                     ) { _, song ->
                                         AlbumCard(
-                                            title = song.title,
-                                            subtitle = song.artist,
+                                            title = song.title.ifBlank { "Untitled Track" },
+                                            subtitle = song.artist.ifBlank { "YouTube Music" },
                                             artworkUrl = song.displayArtworkUrl,
                                             onClick = {
                                                 playbackController.playTrack(
                                                     song,
                                                     followedSongs,
-                                                    "From artists you follow"
+                                                    recommendedTitle
                                                 )
                                             },
                                             onLongClick = { onSongOptionsClick(song) },
@@ -521,7 +603,11 @@ fun HomeScreen(
                                         val subtitle = if (isPlaylist) {
                                             if (album.artist.isNotBlank()) "Playlist · ${album.artist}" else "Playlist"
                                         } else {
-                                            if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist
+                                            if (album.artist.isNotBlank()) {
+                                                if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist
+                                            } else {
+                                                if (album.year.isNotBlank()) "Album · ${album.year}" else "Album"
+                                            }
                                         }
                                         val playlistItem = if (isPlaylist) {
                                             PlaylistItem(
@@ -534,7 +620,7 @@ fun HomeScreen(
                                         AlbumCard(
                                             title = album.title,
                                             subtitle = subtitle,
-                                            artworkUrl = album.thumbnailUrl,
+                                            artworkUrl = album.displayThumbnailUrl,
                                             onClick = {
                                                 if (playlistItem != null && onPlaylistClick != null) {
                                                     onPlaylistClick(playlistItem)

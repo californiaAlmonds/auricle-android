@@ -1,14 +1,19 @@
 package com.auricle.app.ui.screens
 
 import android.content.ActivityNotFoundException
+import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -16,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,12 +33,18 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.auricle.app.AuricleApp
+import com.auricle.app.data.MusicRepository
 import com.auricle.app.model.AlbumItem
+import com.auricle.app.model.ArtistCredit
 import com.auricle.app.model.ArtistItem
 import com.auricle.app.model.PlaylistItem
 import com.auricle.app.model.UserPlaylist
@@ -40,6 +52,7 @@ import com.auricle.app.ui.components.AuricleIcons
 import com.auricle.app.ui.components.auriclePressClickable
 import com.auricle.app.ui.theme.AuricleBrandGradient
 import com.auricle.app.ui.theme.AuricleTheme
+import kotlinx.coroutines.launch
 
 sealed class ContextMenuItem {
     data class Album(val album: AlbumItem) : ContextMenuItem()
@@ -62,10 +75,13 @@ fun ItemOptionBottomSheet(
     onRenamePlaylist: ((String) -> Unit)? = null,
     onDeletePlaylist: (() -> Unit)? = null,
     onShare: (() -> Unit)? = null,
+    musicRepo: MusicRepository = (LocalContext.current.applicationContext as AuricleApp).musicRepository,
+    onGoToArtistCredit: ((ArtistCredit) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var showRenameDialog by remember(item) { mutableStateOf(false) }
@@ -76,10 +92,58 @@ fun ItemOptionBottomSheet(
     }
     var showDeleteDialog by remember(item) { mutableStateOf(false) }
 
+    val initialAlbumArtists = remember(item) {
+        if (item is ContextMenuItem.Album) item.album.parsedArtistCredits() else emptyList()
+    }
+    var resolvedAlbumArtists by remember(item) { mutableStateOf(initialAlbumArtists) }
+    var isResolvingAlbumArtists by remember(item) { mutableStateOf(false) }
+    var showArtistPicker by remember(item) { mutableStateOf(false) }
+    var pendingArtistNavigate by remember(item) { mutableStateOf(false) }
+
+    val currentOnGoToArtistCredit by rememberUpdatedState(onGoToArtistCredit)
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
+    val hasOnGoToArtistCredit = onGoToArtistCredit != null
+
+    val hasAlbumArtists = item is ContextMenuItem.Album &&
+        hasOnGoToArtistCredit &&
+        (item.album.artist.isNotBlank() || initialAlbumArtists.isNotEmpty() || resolvedAlbumArtists.isNotEmpty())
+
+    LaunchedEffect(item, hasOnGoToArtistCredit) {
+        if (item is ContextMenuItem.Album &&
+            hasOnGoToArtistCredit &&
+            item.album.browseId.isNotBlank() &&
+            (item.album.artists.isEmpty() || item.album.artists.any { it.browseId.isBlank() })
+        ) {
+            isResolvingAlbumArtists = true
+            try {
+                val fetched = musicRepo.resolveArtists("album", item.album.browseId, item.album.artist)
+                if (fetched.isNotEmpty()) {
+                    resolvedAlbumArtists = fetched
+                }
+            } finally {
+                isResolvingAlbumArtists = false
+            }
+            if (pendingArtistNavigate) {
+                pendingArtistNavigate = false
+                when {
+                    resolvedAlbumArtists.size > 1 -> showArtistPicker = true
+                    resolvedAlbumArtists.size == 1 -> {
+                        currentOnGoToArtistCredit?.invoke(resolvedAlbumArtists.first())
+                        currentOnDismiss()
+                    }
+                    item.album.artist.isNotBlank() -> {
+                        currentOnGoToArtistCredit?.invoke(ArtistCredit(name = item.album.artist))
+                        currentOnDismiss()
+                    }
+                }
+            }
+        }
+    }
+
     val artworkUrl = when (item) {
-        is ContextMenuItem.Album -> item.album.thumbnailUrl
-        is ContextMenuItem.Artist -> item.artist.thumbnailUrl
-        is ContextMenuItem.RemotePlaylist -> item.playlist.thumbnailUrl
+        is ContextMenuItem.Album -> item.album.displayThumbnailUrl
+        is ContextMenuItem.Artist -> item.artist.displayThumbnailUrl
+        is ContextMenuItem.RemotePlaylist -> item.playlist.displayThumbnailUrl
         is ContextMenuItem.LocalPlaylist -> item.playlist.tracks
             .firstOrNull { it.displayArtworkUrl.isNotBlank() }
             ?.displayArtworkUrl
@@ -151,6 +215,35 @@ fun ItemOptionBottomSheet(
             }
         }
     ) {
+        val view = LocalView.current
+        val isDark = AuricleTheme.colors.isDark
+        if (!view.isInEditMode) {
+            SideEffect {
+                var parent = view.parent
+                var window: android.view.Window? = null
+                while (parent != null) {
+                    if (parent is DialogWindowProvider) {
+                        window = parent.window
+                        break
+                    }
+                    parent = (parent as? android.view.View)?.parent
+                }
+                if (window != null) {
+                    WindowInsetsControllerCompat(window, view).apply {
+                        isAppearanceLightStatusBars = !isDark
+                        isAppearanceLightNavigationBars = !isDark
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.decorView.isForceDarkAllowed = false
+                    }
+                }
+            }
+        }
+
+        BackHandler(enabled = showArtistPicker) {
+            showArtistPicker = false
+        }
+
         Column(
             modifier = modifier
                 .fillMaxWidth()
@@ -181,7 +274,7 @@ fun ItemOptionBottomSheet(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = AuricleIcons.Music,
+                        imageVector = if (item is ContextMenuItem.Artist) AuricleIcons.Artist else AuricleIcons.Music,
                         contentDescription = null,
                         tint = Color.White,
                         modifier = Modifier.size(24.dp)
@@ -245,161 +338,341 @@ fun ItemOptionBottomSheet(
                     .background(AuricleTheme.colors.border)
             )
 
-            // Quick Actions Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                ItemQuickPill(
-                    icon = AuricleIcons.Play,
-                    label = "Play",
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        onPlay()
-                        onDismiss()
-                    }
-                )
-
-                ItemQuickPill(
-                    icon = AuricleIcons.Shuffle,
-                    label = "Shuffle",
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        onShuffle()
-                        onDismiss()
-                    }
-                )
-
-                when (item) {
-                    is ContextMenuItem.Artist -> {
-                        if (onToggleSaveOrFollow != null) {
-                            ItemQuickPill(
-                                icon = if (isSavedOrFollowed) AuricleIcons.Check else AuricleIcons.Plus,
-                                label = if (isSavedOrFollowed) "Following" else "Follow",
-                                iconTint = if (isSavedOrFollowed) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textPrimary,
-                                labelColor = if (isSavedOrFollowed) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textPrimary,
-                                modifier = Modifier.weight(1f),
-                                onClick = {
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    onToggleSaveOrFollow()
-                                    onDismiss()
-                                }
-                            )
-                        } else if (onShare != null) {
-                            ItemQuickPill(
-                                icon = AuricleIcons.Share,
-                                label = "Share",
-                                modifier = Modifier.weight(1f),
-                                onClick = safeShare
+            if (showArtistPicker && item is ContextMenuItem.Album) {
+                // In-Sheet Album Artist Picker Submenu
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Go to Artist",
+                            style = AuricleTheme.typography.headline,
+                            color = AuricleTheme.colors.textPrimary
+                        )
+                        if (isResolvingAlbumArtists && resolvedAlbumArtists.isNotEmpty()) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = AuricleTheme.colors.accentStrong
                             )
                         }
                     }
-                    is ContextMenuItem.Album,
-                    is ContextMenuItem.RemotePlaylist -> {
-                        if (onToggleSaveOrFollow != null) {
-                            ItemQuickPill(
-                                icon = if (isSavedOrFollowed) AuricleIcons.HeartFill else AuricleIcons.Heart,
-                                label = if (isSavedOrFollowed) "Saved" else "Save",
-                                iconTint = if (isSavedOrFollowed) AuricleTheme.colors.danger else AuricleTheme.colors.textPrimary,
-                                modifier = Modifier.weight(1f),
-                                onClick = {
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    onToggleSaveOrFollow()
-                                    onDismiss()
-                                }
-                            )
-                        } else if (onShare != null) {
-                            ItemQuickPill(
-                                icon = AuricleIcons.Share,
-                                label = "Share",
-                                modifier = Modifier.weight(1f),
-                                onClick = safeShare
-                            )
-                        }
+                    Box(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .auriclePressClickable { showArtistPicker = false }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Back",
+                            style = AuricleTheme.typography.bodySB,
+                            color = AuricleTheme.colors.accentStrong
+                        )
                     }
-                    is ContextMenuItem.LocalPlaylist -> {
-                        if (onShare != null) {
-                            ItemQuickPill(
-                                icon = AuricleIcons.Share,
-                                label = "Share",
-                                modifier = Modifier.weight(1f),
-                                onClick = safeShare
-                            )
+                }
+
+                if (isResolvingAlbumArtists && resolvedAlbumArtists.isEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(26.dp),
+                            strokeWidth = 2.5.dp,
+                            color = AuricleTheme.colors.accentStrong
+                        )
+                        Text(
+                            text = "Loading artists…",
+                            style = AuricleTheme.typography.sub,
+                            color = AuricleTheme.colors.textMuted
+                        )
+                    }
+                } else if (resolvedAlbumArtists.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No artist information available.",
+                            style = AuricleTheme.typography.sub,
+                            color = AuricleTheme.colors.textMuted
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 280.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        itemsIndexed(
+                            items = resolvedAlbumArtists,
+                            key = { index, credit -> "$index:${credit.browseId}:${credit.name}" }
+                        ) { _, credit ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 58.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(AuricleTheme.colors.surface2)
+                                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(12.dp))
+                                    .auriclePressClickable {
+                                        onGoToArtistCredit?.invoke(credit)
+                                        onDismiss()
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(CircleShape)
+                                        .background(AuricleTheme.colors.accentSoft),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = AuricleIcons.Artist,
+                                        contentDescription = null,
+                                        tint = AuricleTheme.colors.accentStrong,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = credit.name,
+                                        style = AuricleTheme.typography.bodyM,
+                                        color = AuricleTheme.colors.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Artist",
+                                        style = AuricleTheme.typography.caption,
+                                        color = AuricleTheme.colors.textMuted
+                                    )
+                                }
+                                Icon(
+                                    imageVector = AuricleIcons.ChevronRight,
+                                    contentDescription = null,
+                                    tint = AuricleTheme.colors.textMuted,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
-            }
-
-            // Action Rows
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (onOpenDetail != null) {
-                    val openLabel = when (item) {
-                        is ContextMenuItem.Artist -> "Open Artist"
-                        is ContextMenuItem.Album -> "Open Album"
-                        is ContextMenuItem.RemotePlaylist,
-                        is ContextMenuItem.LocalPlaylist -> "Open Playlist"
-                    }
-                    val openIcon = when (item) {
-                        is ContextMenuItem.Artist -> AuricleIcons.Artist
-                        is ContextMenuItem.Album -> AuricleIcons.Album
-                        is ContextMenuItem.RemotePlaylist,
-                        is ContextMenuItem.LocalPlaylist -> AuricleIcons.Queue
-                    }
-                    ItemActionRow(
-                        icon = openIcon,
-                        label = openLabel,
-                        trailingIcon = AuricleIcons.ChevronRight,
+            } else {
+                // Quick Actions Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ItemQuickPill(
+                        icon = AuricleIcons.Play,
+                        label = "Play",
+                        modifier = Modifier.weight(1f),
                         onClick = {
-                            onOpenDetail()
+                            onPlay()
                             onDismiss()
                         }
                     )
-                }
 
-                if (onAddToQueue != null) {
-                    ItemActionRow(
-                        icon = AuricleIcons.ListPlus,
-                        label = "Add to Queue",
+                    ItemQuickPill(
+                        icon = AuricleIcons.Shuffle,
+                        label = "Shuffle",
+                        modifier = Modifier.weight(1f),
                         onClick = {
-                            onAddToQueue()
+                            onShuffle()
                             onDismiss()
                         }
                     )
+
+                    when (item) {
+                        is ContextMenuItem.Artist -> {
+                            if (onToggleSaveOrFollow != null) {
+                                ItemQuickPill(
+                                    icon = if (isSavedOrFollowed) AuricleIcons.Check else AuricleIcons.Plus,
+                                    label = if (isSavedOrFollowed) "Following" else "Follow",
+                                    iconTint = if (isSavedOrFollowed) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textPrimary,
+                                    labelColor = if (isSavedOrFollowed) AuricleTheme.colors.accentStrong else AuricleTheme.colors.textPrimary,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onToggleSaveOrFollow()
+                                        onDismiss()
+                                    }
+                                )
+                            } else if (onShare != null) {
+                                ItemQuickPill(
+                                    icon = AuricleIcons.Share,
+                                    label = "Share",
+                                    modifier = Modifier.weight(1f),
+                                    onClick = safeShare
+                                )
+                            }
+                        }
+                        is ContextMenuItem.Album,
+                        is ContextMenuItem.RemotePlaylist -> {
+                            if (onToggleSaveOrFollow != null) {
+                                ItemQuickPill(
+                                    icon = if (isSavedOrFollowed) AuricleIcons.HeartFill else AuricleIcons.Heart,
+                                    label = if (isSavedOrFollowed) "Saved" else "Save",
+                                    iconTint = if (isSavedOrFollowed) AuricleTheme.colors.danger else AuricleTheme.colors.textPrimary,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onToggleSaveOrFollow()
+                                        onDismiss()
+                                    }
+                                )
+                            } else if (onShare != null) {
+                                ItemQuickPill(
+                                    icon = AuricleIcons.Share,
+                                    label = "Share",
+                                    modifier = Modifier.weight(1f),
+                                    onClick = safeShare
+                                )
+                            }
+                        }
+                        is ContextMenuItem.LocalPlaylist -> {
+                            if (onShare != null) {
+                                ItemQuickPill(
+                                    icon = AuricleIcons.Share,
+                                    label = "Share",
+                                    modifier = Modifier.weight(1f),
+                                    onClick = safeShare
+                                )
+                            }
+                        }
+                    }
                 }
 
-                if (item is ContextMenuItem.LocalPlaylist) {
-                    if (onRenamePlaylist != null) {
+                // Action Rows
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (onOpenDetail != null) {
+                        val openLabel = when (item) {
+                            is ContextMenuItem.Artist -> "Open Artist"
+                            is ContextMenuItem.Album -> "Open Album"
+                            is ContextMenuItem.RemotePlaylist,
+                            is ContextMenuItem.LocalPlaylist -> "Open Playlist"
+                        }
+                        val openIcon = when (item) {
+                            is ContextMenuItem.Artist -> AuricleIcons.Artist
+                            is ContextMenuItem.Album -> AuricleIcons.Album
+                            is ContextMenuItem.RemotePlaylist,
+                            is ContextMenuItem.LocalPlaylist -> AuricleIcons.Queue
+                        }
                         ItemActionRow(
-                            icon = AuricleIcons.Edit,
-                            label = "Rename Playlist",
+                            icon = openIcon,
+                            label = openLabel,
+                            trailingIcon = AuricleIcons.ChevronRight,
                             onClick = {
-                                renameText = item.playlist.name
-                                showRenameDialog = true
+                                onOpenDetail()
+                                onDismiss()
                             }
                         )
                     }
 
-                    if (onDeletePlaylist != null) {
+                    if (onAddToQueue != null) {
                         ItemActionRow(
-                            icon = AuricleIcons.Trash,
-                            label = "Delete Playlist",
-                            iconTint = AuricleTheme.colors.danger,
-                            labelColor = AuricleTheme.colors.danger,
-                            onClick = { showDeleteDialog = true }
+                            icon = AuricleIcons.ListPlus,
+                            label = "Add to Queue",
+                            onClick = {
+                                onAddToQueue()
+                                onDismiss()
+                            }
                         )
                     }
-                }
 
-                val shareShownInQuickPills = item is ContextMenuItem.LocalPlaylist || onToggleSaveOrFollow == null
-                if (onShare != null && !shareShownInQuickPills) {
-                    ItemActionRow(
-                        icon = AuricleIcons.Share,
-                        label = "Share",
-                        onClick = safeShare
-                    )
+                    if (hasAlbumArtists && item is ContextMenuItem.Album) {
+                        val hasMultipleArtists = resolvedAlbumArtists.size > 1
+                        ItemActionRow(
+                            icon = AuricleIcons.Artist,
+                            label = "Go to Artist",
+                            trailingLabel = if (hasMultipleArtists) "${resolvedAlbumArtists.size}" else null,
+                            trailingIcon = if (hasMultipleArtists || (isResolvingAlbumArtists && resolvedAlbumArtists.isEmpty())) AuricleIcons.ChevronRight else null,
+                            isLoading = pendingArtistNavigate && isResolvingAlbumArtists,
+                            onClick = {
+                                if (isResolvingAlbumArtists) {
+                                    if (resolvedAlbumArtists.size > 1) {
+                                        showArtistPicker = true
+                                    } else {
+                                        pendingArtistNavigate = true
+                                    }
+                                } else if (resolvedAlbumArtists.size > 1) {
+                                    showArtistPicker = true
+                                } else if (resolvedAlbumArtists.size == 1) {
+                                    currentOnGoToArtistCredit?.invoke(resolvedAlbumArtists.first())
+                                    currentOnDismiss()
+                                } else {
+                                    scope.launch {
+                                        val fetched = musicRepo.resolveArtists(
+                                            "album",
+                                            item.album.browseId,
+                                            item.album.artist
+                                        )
+                                        if (fetched.size > 1) {
+                                            resolvedAlbumArtists = fetched
+                                            showArtistPicker = true
+                                        } else if (fetched.size == 1) {
+                                            currentOnGoToArtistCredit?.invoke(fetched.first())
+                                            currentOnDismiss()
+                                        } else if (item.album.artist.isNotBlank()) {
+                                            currentOnGoToArtistCredit?.invoke(ArtistCredit(name = item.album.artist))
+                                            currentOnDismiss()
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+
+                    if (item is ContextMenuItem.LocalPlaylist) {
+                        if (onRenamePlaylist != null) {
+                            ItemActionRow(
+                                icon = AuricleIcons.Edit,
+                                label = "Rename Playlist",
+                                onClick = {
+                                    renameText = item.playlist.name
+                                    showRenameDialog = true
+                                }
+                            )
+                        }
+
+                        if (onDeletePlaylist != null) {
+                            ItemActionRow(
+                                icon = AuricleIcons.Trash,
+                                label = "Delete Playlist",
+                                iconTint = AuricleTheme.colors.danger,
+                                labelColor = AuricleTheme.colors.danger,
+                                onClick = { showDeleteDialog = true }
+                            )
+                        }
+                    }
+
+                    val shareShownInQuickPills = item is ContextMenuItem.LocalPlaylist || onToggleSaveOrFollow == null
+                    if (onShare != null && !shareShownInQuickPills) {
+                        ItemActionRow(
+                            icon = AuricleIcons.Share,
+                            label = "Share",
+                            onClick = safeShare
+                        )
+                    }
                 }
             }
         }
@@ -553,7 +826,9 @@ private fun ItemActionRow(
     label: String,
     iconTint: Color = AuricleTheme.colors.textPrimary,
     labelColor: Color = AuricleTheme.colors.textPrimary,
+    trailingLabel: String? = null,
     trailingIcon: ImageVector? = null,
+    isLoading: Boolean = false,
     onClick: () -> Unit
 ) {
     Row(
@@ -580,13 +855,33 @@ private fun ItemActionRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        if (trailingIcon != null) {
-            Icon(
-                imageVector = trailingIcon,
-                contentDescription = null,
-                tint = AuricleTheme.colors.textMuted,
-                modifier = Modifier.size(18.dp)
+        if (isLoading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = AuricleTheme.colors.accentStrong
             )
+        } else if (trailingLabel != null || trailingIcon != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (trailingLabel != null) {
+                    Text(
+                        text = trailingLabel,
+                        style = AuricleTheme.typography.captionSB,
+                        color = AuricleTheme.colors.textMuted
+                    )
+                }
+                if (trailingIcon != null) {
+                    Icon(
+                        imageVector = trailingIcon,
+                        contentDescription = null,
+                        tint = AuricleTheme.colors.textMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
     }
 }

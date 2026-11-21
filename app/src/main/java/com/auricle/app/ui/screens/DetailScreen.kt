@@ -136,10 +136,16 @@ fun DetailScreen(
                     isLoading = true
                     try {
                         var browseId = target.artistItem.browseId
+                        var matchedArtistThumb = ""
                         if (browseId.isBlank() && target.artistItem.name.isNotBlank()) {
                             musicRepo.search(target.artistItem.name, "artists")
                                 .onSuccess { sRes ->
-                                    browseId = sRes.artists.firstOrNull()?.browseId.orEmpty()
+                                    val targetName = target.artistItem.name.trim()
+                                    val matched = sRes.artists.firstOrNull {
+                                        it.name.trim().equals(targetName, ignoreCase = true)
+                                    } ?: sRes.artists.firstOrNull()
+                                    browseId = matched?.browseId.orEmpty()
+                                    matchedArtistThumb = matched?.thumbnailUrl.orEmpty()
                                 }
                                 .onFailure { err ->
                                     loadError = err.message ?: "Failed to load artist"
@@ -150,7 +156,9 @@ fun DetailScreen(
                             musicRepo.getArtist(browseId)
                                 .onSuccess { fetched ->
                                     fullArtist = if (fetched.thumbnailUrl.isBlank()) {
-                                        fetched.copy(thumbnailUrl = target.artistItem.thumbnailUrl)
+                                        fetched.copy(
+                                            thumbnailUrl = matchedArtistThumb.ifBlank { target.artistItem.thumbnailUrl }
+                                        )
                                     } else {
                                         fetched
                                     }
@@ -299,28 +307,38 @@ private fun ArtistDetailContent(
                         .fillMaxWidth()
                         .height(420.dp)
                 ) {
-                    if (artist.thumbnailUrl.isNotBlank()) {
+                    val heroPhotoUrl = artist.highResThumbnailUrl
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        AuricleTheme.colors.accent.copy(alpha = 0.45f),
+                                        AuricleTheme.colors.bg
+                                    )
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (heroPhotoUrl.isBlank()) {
+                            Icon(
+                                imageVector = AuricleIcons.Artist,
+                                contentDescription = null,
+                                tint = AuricleTheme.colors.textDim.copy(alpha = 0.4f),
+                                modifier = Modifier.size(72.dp)
+                            )
+                        }
+                    }
+                    if (heroPhotoUrl.isNotBlank()) {
                         AsyncImage(
                             model = ImageRequest.Builder(LocalContext.current)
-                                .data(artist.thumbnailUrl)
+                                .data(heroPhotoUrl)
                                 .crossfade(true)
                                 .build(),
                             contentDescription = "Artist Hero Photo",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(
-                                            AuricleTheme.colors.accent.copy(alpha = 0.45f),
-                                            AuricleTheme.colors.bg
-                                        )
-                                    )
-                                )
                         )
                     }
 
@@ -518,7 +536,7 @@ private fun ArtistDetailContent(
                                     AlbumCard(
                                         title = alb.title,
                                         subtitle = if (alb.year.isNotBlank()) "$typeLabel · ${alb.year}" else typeLabel,
-                                        artworkUrl = alb.thumbnailUrl,
+                                        artworkUrl = alb.displayThumbnailUrl,
                                         onClick = { onAlbumClick(alb) },
                                         onLongClick = onAlbumLongClick?.let { cb -> { cb(alb) } },
                                         width = 160.dp
@@ -600,7 +618,7 @@ private fun StandardDetailContent(
                     title = alb.title,
                     subtitle = alb.artist,
                     yearOrCount = if (alb.year.isNotBlank()) "Album · ${alb.year}" else "Album",
-                    artworkUrl = alb.thumbnailUrl,
+                    artworkUrl = alb.highResThumbnailUrl,
                     tracks = alb.tracks,
                     isAlbum = true,
                     coverKey = alb.browseId.ifBlank { alb.title }
@@ -612,7 +630,7 @@ private fun StandardDetailContent(
                     title = pl.title,
                     subtitle = pl.author,
                     yearOrCount = "Playlist · ${pl.tracks.size} songs",
-                    artworkUrl = pl.thumbnailUrl,
+                    artworkUrl = pl.highResThumbnailUrl,
                     tracks = pl.tracks,
                     isAlbum = false,
                     coverKey = pl.playlistId
@@ -625,7 +643,7 @@ private fun StandardDetailContent(
                     title = pl.name,
                     subtitle = "Custom Playlist",
                     yearOrCount = countLabel,
-                    artworkUrl = pl.tracks.firstOrNull()?.displayArtworkUrl ?: "",
+                    artworkUrl = pl.tracks.firstOrNull { it.highResArtworkUrl.isNotBlank() }?.highResArtworkUrl ?: "",
                     tracks = pl.tracks,
                     isAlbum = false,
                     coverKey = pl.id,
@@ -652,7 +670,7 @@ private fun StandardDetailContent(
                     title = "Recently Played",
                     subtitle = "Playback History",
                     yearOrCount = countLabel,
-                    artworkUrl = recentSongs.firstOrNull()?.displayArtworkUrl ?: "",
+                    artworkUrl = recentSongs.firstOrNull { it.highResArtworkUrl.isNotBlank() }?.highResArtworkUrl ?: "",
                     tracks = recentSongs,
                     isAlbum = false,
                     coverKey = "recently_played",
@@ -943,8 +961,13 @@ private fun StandardDetailContent(
                             }
                         }
                         customPlaylistId != null -> {
+                            val collageUrls = if (tracks.size < 4) {
+                                tracks.map { it.highResArtworkUrl }.filter { it.isNotBlank() }
+                            } else {
+                                tracks.map { it.displayArtworkUrl }.filter { it.isNotBlank() }
+                            }
                             PlaylistCollageArt(
-                                artworkUrls = tracks.map { it.displayArtworkUrl }.filter { it.isNotBlank() },
+                                artworkUrls = collageUrls,
                                 size = 248.dp,
                                 cornerRadius = 14.dp
                             )
@@ -967,19 +990,32 @@ private fun StandardDetailContent(
                             }
                         }
                         else -> {
-                            AsyncImage(
-                                model = ImageRequest.Builder(LocalContext.current)
-                                    .data(artworkUrl)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "Cover Artwork",
-                                contentScale = ContentScale.Crop,
+                            Box(
                                 modifier = coverArtworkModifier(coverKey)
                                     .size(248.dp)
                                     .clip(RoundedCornerShape(14.dp))
-                                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(14.dp))
                                     .background(AuricleTheme.colors.surface2)
-                            )
+                                    .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(14.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = AuricleIcons.Music,
+                                    contentDescription = null,
+                                    tint = AuricleTheme.colors.textDim.copy(alpha = 0.55f),
+                                    modifier = Modifier.size(64.dp)
+                                )
+                                if (artworkUrl.isNotBlank()) {
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(LocalContext.current)
+                                            .data(artworkUrl)
+                                            .crossfade(true)
+                                            .build(),
+                                        contentDescription = "Cover Artwork",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -987,12 +1023,10 @@ private fun StandardDetailContent(
 
             // Metadata: Title, Artist, Year/Count
             item {
-                val clickableArtistName = if (target is DetailTarget.Album) {
-                    (fullAlbum?.artist?.takeIf { it.isNotBlank() } ?: target.albumItem.artist)
-                        .takeIf { it.isNotBlank() }
-                } else {
-                    null
-                }
+                val albumForArtist = if (target is DetailTarget.Album) (fullAlbum ?: target.albumItem) else null
+                val clickableArtistName = albumForArtist
+                    ?.let { alb -> alb.artist.takeIf { it.isNotBlank() } ?: target.let { (it as DetailTarget.Album).albumItem.artist } }
+                    ?.takeIf { it.isNotBlank() }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1013,7 +1047,14 @@ private fun StandardDetailContent(
                         textAlign = TextAlign.Center,
                         modifier = if (clickableArtistName != null) {
                             Modifier.clickable {
-                                onArtistClick(ArtistItem(name = clickableArtistName, browseId = "", thumbnailUrl = ""))
+                                val singleCredit = albumForArtist?.parsedArtistCredits()?.singleOrNull()
+                                onArtistClick(
+                                    ArtistItem(
+                                        name = singleCredit?.name?.ifBlank { clickableArtistName } ?: clickableArtistName,
+                                        browseId = singleCredit?.browseId.orEmpty(),
+                                        thumbnailUrl = ""
+                                    )
+                                )
                             }
                         } else {
                             Modifier
