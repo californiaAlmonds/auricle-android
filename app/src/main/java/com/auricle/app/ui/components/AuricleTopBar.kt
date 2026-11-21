@@ -8,7 +8,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -145,11 +144,7 @@ fun AuricleCollapsedTopBar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .auricleGlass(
-                    shape = RoundedCornerShape(0.dp),
-                    fallbackColor = AuricleTheme.colors.tabBarGlass,
-                    borderColor = Color.Transparent
-                )
+                .background(AuricleTheme.colors.bg.copy(alpha = 0.96f))
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() }

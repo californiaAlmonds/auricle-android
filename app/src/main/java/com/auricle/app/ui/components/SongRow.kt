@@ -2,6 +2,7 @@ package com.auricle.app.ui.components
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -94,8 +95,15 @@ fun SongRow(
                 modifier = Modifier
                     .size(48.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(AuricleTheme.colors.surface)
+                    .background(AuricleTheme.colors.surface),
+                contentAlignment = Alignment.Center
             ) {
+                Icon(
+                    imageVector = AuricleIcons.Music,
+                    contentDescription = null,
+                    tint = AuricleTheme.colors.textMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.size(20.dp)
+                )
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(song.displayArtworkUrl)
@@ -279,27 +287,49 @@ fun OnArtQueueRow(
     onRemove: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     showDragHandle: Boolean = true,
+    isAutoplay: Boolean = false,
+    isDragging: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val rowShape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(56.dp)
+            .padding(horizontal = if (isDragging) 8.dp else 0.dp)
+            .clip(rowShape)
+            .background(if (isDragging) Color.White.copy(alpha = 0.16f) else Color.Transparent)
+            .then(
+                if (isDragging) {
+                    Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), rowShape)
+                } else {
+                    Modifier
+                }
+            )
             .auriclePressClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
             )
     ) {
         Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = if (isDragging) 8.dp else 16.dp, end = if (isDragging) 0.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(Color.White.copy(alpha = 0.12f))
+                    .background(Color.White.copy(alpha = 0.10f)),
+                contentAlignment = Alignment.Center
             ) {
+                Icon(
+                    imageVector = AuricleIcons.Music,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.35f * alpha),
+                    modifier = Modifier.size(18.dp)
+                )
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(song.displayArtworkUrl)
@@ -325,7 +355,7 @@ fun OnArtQueueRow(
                 Text(
                     text = song.artist,
                     style = AuricleTheme.typography.sub,
-                    color = Color.White.copy(alpha = alpha * 0.65f),
+                    color = Color.White.copy(alpha = alpha * 0.68f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -334,34 +364,39 @@ fun OnArtQueueRow(
             if (onRemove != null) {
                 Box(
                     modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .size(32.dp)
-                        .auriclePressClickable(onClick = onRemove),
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .auriclePressClickable(onClick = onRemove)
+                        .semantics {
+                            contentDescription = if (isAutoplay) {
+                                "Remove ${song.title} from autoplay"
+                            } else {
+                                "Remove ${song.title} from queue"
+                            }
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = AuricleIcons.Trash,
-                        contentDescription = "Remove",
-                        tint = Color.White.copy(alpha = 0.55f),
-                        modifier = Modifier.size(20.dp)
+                        imageVector = if (isAutoplay) AuricleIcons.Close else AuricleIcons.Trash,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.58f),
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
 
             if (showDragHandle) {
-                if (onRemove != null) {
-                    Spacer(Modifier.width(8.dp))
-                }
                 Box(
-                    modifier = dragHandleModifier
-                        .minimumInteractiveComponentSize()
-                        .size(32.dp),
+                    modifier = Modifier
+                        .size(44.dp)
+                        .then(dragHandleModifier)
+                        .semantics { contentDescription = "Reorder ${song.title}" },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = AuricleIcons.Grip,
-                        contentDescription = "Drag Handle",
-                        tint = Color.White.copy(alpha = 0.55f),
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = if (isDragging) 0.95f else 0.60f),
                         modifier = Modifier.size(20.dp)
                     )
                 }

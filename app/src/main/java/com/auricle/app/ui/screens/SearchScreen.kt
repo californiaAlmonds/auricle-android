@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -31,6 +32,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -39,7 +41,9 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -64,19 +68,28 @@ private const val KEY_DISMISSED_RECENT_SEARCHES = "dismissed_recent_searches"
 private data class CategoryTile(
     val title: String,
     val startColor: Color,
-    val endColor: Color
+    val endColor: Color,
+    val icon: ImageVector
 )
 
 private val BrowseCategories = listOf(
-    CategoryTile("Top Hits", Color(0xFFE2503F), Color(0xFFF2703A)),
-    CategoryTile("Chill Lofi", Color(0xFF8B5CF6), Color(0xFF46A6E6)),
-    CategoryTile("Bollywood", Color(0xFFF2703A), Color(0xFFB06A43)),
-    CategoryTile("Punjabi", Color(0xFF3FA96A), Color(0xFF1699A8)),
-    CategoryTile("Indie", Color(0xFF46A6E6), Color(0xFF1699A8)),
-    CategoryTile("Romance", Color(0xFFE26AA0), Color(0xFFE2503F)),
-    CategoryTile("Synthwave", Color(0xFFE26AA0), Color(0xFF8B5CF6)),
-    CategoryTile("Bengali", Color(0xFFB06A43), Color(0xFFE2503F))
+    CategoryTile("Top Hits", Color(0xFFD93829), Color(0xFFF26430), AuricleIcons.Flame),
+    CategoryTile("Chill Lofi", Color(0xFF312E81), Color(0xFF4F46E5), AuricleIcons.Moon),
+    CategoryTile("Bollywood", Color(0xFFA16207), Color(0xFFEAB308), AuricleIcons.Sparkles),
+    CategoryTile("Punjabi", Color(0xFF047857), Color(0xFF10B981), AuricleIcons.Music),
+    CategoryTile("Indie", Color(0xFF0369A1), Color(0xFF0EA5E9), AuricleIcons.Explore),
+    CategoryTile("Romance", Color(0xFFBE185D), Color(0xFFF43F5E), AuricleIcons.Heart),
+    CategoryTile("Synthwave", Color(0xFF7E22CE), Color(0xFFEC4899), AuricleIcons.Radio),
+    CategoryTile("Bengali", Color(0xFF115E59), Color(0xFF06B6D4), AuricleIcons.Album)
 )
+
+private fun categoryToParam(category: String): String = when (category.lowercase()) {
+    "songs" -> "songs"
+    "albums" -> "albums"
+    "artists" -> "artists"
+    "playlists" -> "playlists"
+    else -> "all"
+}
 
 @Composable
 fun SearchScreen(
@@ -125,17 +138,26 @@ fun SearchScreen(
     }
 
     var query by rememberSaveable { mutableStateOf(savedQuery) }
+    var textFieldSelection by remember { mutableStateOf(TextRange(query.length)) }
     var isSearchActive by rememberSaveable {
         mutableStateOf(savedQuery.isNotBlank() || savedResults != null)
+    }
+    var hasSubmittedExactQuery by rememberSaveable {
+        mutableStateOf(savedResults != null && savedQuery.isNotBlank())
     }
     var isFieldFocused by remember { mutableStateOf(false) }
     var selectedCategory by rememberSaveable { mutableStateOf(savedCategory) }
     var searchResults by remember { mutableStateOf(savedResults) }
+    var lastResultsQuery by remember { mutableStateOf(if (savedResults != null) savedQuery.trim() else null) }
+    var lastResultsCategory by remember { mutableStateOf(if (savedResults != null) savedCategory else null) }
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
+    var isLiveSearching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
 
+    var liveRequestGen by remember { mutableIntStateOf(0) }
     var searchJob by remember { mutableStateOf<Job?>(null) }
+    var liveSearchJob by remember { mutableStateOf<Job?>(null) }
     var suggestionJob by remember { mutableStateOf<Job?>(null) }
 
     var lastHandledFocusTrigger by remember { mutableIntStateOf(focusTrigger) }
@@ -162,15 +184,45 @@ fun SearchScreen(
         onSavedCategoryChange(newCategory)
     }
 
-    fun updateResults(newResults: SearchResultData?) {
+    fun updateResults(newResults: SearchResultData?, forQuery: String? = null, forCategory: String? = null) {
         searchResults = newResults
+        lastResultsQuery = if (newResults != null) forQuery else null
+        lastResultsCategory = if (newResults != null) forCategory else null
         onSavedResultsChange(newResults)
     }
 
+    fun unDismissRecentSearch(term: String) {
+        if (dismissedRecentSearches.any { it.equals(term, ignoreCase = true) }) {
+            val updatedDismissed = dismissedRecentSearches
+                .filterNot { it.equals(term, ignoreCase = true) }
+                .toSet()
+            dismissedRecentSearches = updatedDismissed
+            searchPrefs.edit().putStringSet(KEY_DISMISSED_RECENT_SEARCHES, updatedDismissed).apply()
+        }
+    }
+
+    fun commitSearchInteraction() {
+        focusManager.clearFocus()
+        keyboardController?.hide()
+        val trimmed = query.trim()
+        if (trimmed.isNotBlank()) {
+            unDismissRecentSearch(trimmed)
+            settingsRepo.addRecentSearch(trimmed)
+            hasSubmittedExactQuery = true
+            suggestions = emptyList()
+            suggestionJob?.cancel()
+        }
+    }
+
     fun exitSearchMode() {
+        liveRequestGen++
         searchJob?.cancel()
+        liveSearchJob?.cancel()
         suggestionJob?.cancel()
         isLoading = false
+        isLiveSearching = false
+        hasSubmittedExactQuery = false
+        textFieldSelection = TextRange.Zero
         updateQuery("")
         updateResults(null)
         suggestions = emptyList()
@@ -184,35 +236,42 @@ fun SearchScreen(
     fun executeSearch(searchQuery: String, category: String = selectedCategory) {
         val trimmed = searchQuery.trim()
         if (trimmed.isBlank()) return
+        liveRequestGen++
         searchJob?.cancel()
+        liveSearchJob?.cancel()
         suggestionJob?.cancel()
+        isLiveSearching = false
         keyboardController?.hide()
         focusManager.clearFocus()
+        hasSubmittedExactQuery = true
         suggestions = emptyList()
         searchError = null
 
-        if (dismissedRecentSearches.any { it.equals(trimmed, ignoreCase = true) }) {
-            val updatedDismissed = dismissedRecentSearches
-                .filterNot { it.equals(trimmed, ignoreCase = true) }
-                .toSet()
-            dismissedRecentSearches = updatedDismissed
-            searchPrefs.edit().putStringSet(KEY_DISMISSED_RECENT_SEARCHES, updatedDismissed).apply()
-        }
+        unDismissRecentSearch(trimmed)
         settingsRepo.addRecentSearch(trimmed)
 
-        isLoading = true
+        // Reuse already-fetched live results if exact query & category already loaded cleanly
+        if (searchResults != null &&
+            lastResultsQuery.equals(trimmed, ignoreCase = true) &&
+            lastResultsCategory == category
+        ) {
+            isLoading = false
+            return
+        }
+
+        val showFullSkeleton = searchResults == null ||
+            !lastResultsQuery.equals(trimmed, ignoreCase = true) ||
+            lastResultsCategory != category
+        if (showFullSkeleton) {
+            isLoading = true
+        }
+        val requestGen = liveRequestGen
         searchJob = coroutineScope.launch {
-            val catParam = when (category.lowercase()) {
-                "songs" -> "songs"
-                "albums" -> "albums"
-                "artists" -> "artists"
-                "playlists" -> "playlists"
-                else -> "all"
-            }
+            val catParam = categoryToParam(category)
             val result = musicRepo.search(trimmed, catParam)
-            if (query.trim() == trimmed) {
+            if (liveRequestGen == requestGen && query.trim() == trimmed) {
                 result.onSuccess { data ->
-                    updateResults(data)
+                    updateResults(data, forQuery = trimmed, forCategory = category)
                     searchError = null
                     isLoading = false
                 }.onFailure { err ->
@@ -235,20 +294,49 @@ fun SearchScreen(
         }
     }
 
-    LaunchedEffect(query) {
+    // Parallel debounced suggestions (180ms) + live search results (320ms) while typing
+    LaunchedEffect(query, hasSubmittedExactQuery) {
+        if (hasSubmittedExactQuery) {
+            suggestionJob?.cancel()
+            liveSearchJob?.cancel()
+            isLiveSearching = false
+            return@LaunchedEffect
+        }
+
         val trimmed = query.trim()
-        if (trimmed.length >= 2 && searchResults == null) {
-            suggestionJob?.cancel()
-            suggestionJob = coroutineScope.launch {
-                delay(200)
-                val list = musicRepo.getSearchSuggestions(trimmed)
-                if (searchResults == null && query.trim() == trimmed) {
-                    suggestions = list
-                }
-            }
-        } else {
-            suggestionJob?.cancel()
+        suggestionJob?.cancel()
+        liveSearchJob?.cancel()
+
+        if (trimmed.length < 2) {
+            liveRequestGen++
+            isLiveSearching = false
             suggestions = emptyList()
+            return@LaunchedEffect
+        }
+
+        val gen = ++liveRequestGen
+        val activeCategory = selectedCategory
+        val catParam = categoryToParam(activeCategory)
+        isLiveSearching = true
+
+        suggestionJob = coroutineScope.launch {
+            delay(180)
+            val list = musicRepo.getSearchSuggestions(trimmed)
+            if (liveRequestGen == gen && !hasSubmittedExactQuery && query.trim() == trimmed) {
+                suggestions = list.take(4)
+            }
+        }
+
+        liveSearchJob = coroutineScope.launch {
+            delay(320)
+            val result = musicRepo.search(trimmed, catParam)
+            if (liveRequestGen == gen && !hasSubmittedExactQuery && query.trim() == trimmed) {
+                result.onSuccess { data ->
+                    updateResults(data, forQuery = trimmed, forCategory = activeCategory)
+                    searchError = null
+                }
+                isLiveSearching = false
+            }
         }
     }
 
@@ -321,14 +409,32 @@ fun SearchScreen(
                                         color = AuricleTheme.colors.textMuted
                                     )
                                 }
+                                val textFieldValue = TextFieldValue(
+                                    text = query,
+                                    selection = TextRange(
+                                        textFieldSelection.start.coerceIn(0, query.length),
+                                        textFieldSelection.end.coerceIn(0, query.length)
+                                    )
+                                )
                                 BasicTextField(
-                                    value = query,
-                                    onValueChange = {
-                                        searchJob?.cancel()
-                                        isLoading = false
-                                        updateQuery(it)
-                                        updateResults(null)
-                                        searchError = null
+                                    value = textFieldValue,
+                                    onValueChange = { newValue ->
+                                        textFieldSelection = newValue.selection
+                                        if (newValue.text != query) {
+                                            searchJob?.cancel()
+                                            liveSearchJob?.cancel()
+                                            suggestionJob?.cancel()
+                                            isLoading = false
+                                            hasSubmittedExactQuery = false
+                                            searchError = null
+                                            updateQuery(newValue.text)
+                                            if (newValue.text.isBlank()) {
+                                                liveRequestGen++
+                                                isLiveSearching = false
+                                                suggestions = emptyList()
+                                                updateResults(null)
+                                            }
+                                        }
                                     },
                                     singleLine = true,
                                     textStyle = AuricleTheme.typography.body.copy(color = AuricleTheme.colors.textPrimary),
@@ -349,9 +455,14 @@ fun SearchScreen(
                                         .clip(CircleShape)
                                         .background(AuricleTheme.colors.fillSoft)
                                         .clickable {
+                                            liveRequestGen++
                                             searchJob?.cancel()
+                                            liveSearchJob?.cancel()
                                             suggestionJob?.cancel()
                                             isLoading = false
+                                            isLiveSearching = false
+                                            hasSubmittedExactQuery = false
+                                            textFieldSelection = TextRange.Zero
                                             updateQuery("")
                                             updateResults(null)
                                             suggestions = emptyList()
@@ -404,6 +515,11 @@ fun SearchScreen(
                         )
                     }
                 }
+            }
+
+            // Recent searches shared filter
+            val recentList = settings.recentSearches.filterNot { term ->
+                dismissedRecentSearches.any { it.equals(term, ignoreCase = true) }
             }
 
             // Body Area
@@ -467,9 +583,6 @@ fun SearchScreen(
                     }
 
                     // Recent Searches
-                    val recentList = settings.recentSearches.filterNot { term ->
-                        dismissedRecentSearches.any { it.equals(term, ignoreCase = true) }
-                    }
                     if (recentList.isNotEmpty()) {
                         item {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -518,6 +631,7 @@ fun SearchScreen(
                                                     .fillMaxHeight()
                                                     .auriclePressClickable(onClick = {
                                                         updateCategory("All")
+                                                        textFieldSelection = TextRange(term.length)
                                                         updateQuery(term)
                                                         isSearchActive = true
                                                         executeSearch(term, "All")
@@ -592,6 +706,7 @@ fun SearchScreen(
                                                 .background(Brush.linearGradient(listOf(cat.startColor, cat.endColor)))
                                                 .auriclePressClickable {
                                                     updateCategory("All")
+                                                    textFieldSelection = TextRange(cat.title.length)
                                                     updateQuery(cat.title)
                                                     isSearchActive = true
                                                     executeSearch(cat.title, "All")
@@ -605,22 +720,22 @@ fun SearchScreen(
                                                     .padding(14.dp)
                                                     .align(Alignment.TopStart)
                                             )
-                                            // Decorative rotated card
+                                            // Decorative rotated card with distinct category glyph
                                             Box(
                                                 modifier = Modifier
                                                     .align(Alignment.BottomEnd)
                                                     .offset(x = 10.dp, y = 10.dp)
                                                     .size(76.dp)
                                                     .graphicsLayer { rotationZ = 18f }
-                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clip(RoundedCornerShape(10.dp))
                                                     .background(Color.White.copy(alpha = 0.22f))
-                                                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(8.dp)),
+                                                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(10.dp)),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Icon(
-                                                    imageVector = AuricleIcons.Music,
+                                                    imageVector = cat.icon,
                                                     contentDescription = null,
-                                                    tint = Color.White.copy(alpha = 0.85f),
+                                                    tint = Color.White.copy(alpha = 0.90f),
                                                     modifier = Modifier.size(28.dp)
                                                 )
                                             }
@@ -635,11 +750,14 @@ fun SearchScreen(
                     }
                 }
             } else {
-                // Active Mode Body: Loading, Error, Suggestions, or Search Results
+                // Active Mode Body: Loading, Error, Live Suggestions + Live/Submitted Search Results
                 Box(modifier = Modifier.weight(1f)) {
-                    if (isLoading) {
+                    val showSuggestions = !hasSubmittedExactQuery && query.trim().length >= 2 && suggestions.isNotEmpty()
+                    val res = searchResults
+
+                    if (isLoading && res == null) {
                         FeedLoadingSkeleton(modifier = Modifier.fillMaxWidth())
-                    } else if (searchError != null) {
+                    } else if (searchError != null && res == null) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -654,44 +772,61 @@ fun SearchScreen(
                                 onActionClick = { executeSearch(query, selectedCategory) }
                             )
                         }
-                    } else if (suggestions.isNotEmpty() && searchResults == null) {
-                        // Live Autocomplete Suggestions
+                    } else if (query.isBlank() && res == null && recentList.isNotEmpty()) {
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                            contentPadding = PaddingValues(top = 8.dp, bottom = bottomContentPadding),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            itemsIndexed(suggestions, key = { idx, item -> "suggestion-$item-$idx" }) { _, item ->
+                            item(key = "active-recent-header") {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .clickable {
-                                            updateQuery(item)
-                                            executeSearch(item, selectedCategory)
-                                        }
-                                        .padding(vertical = 12.dp, horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = AuricleIcons.Search,
-                                        contentDescription = null,
-                                        tint = AuricleTheme.colors.textMuted,
-                                        modifier = Modifier.size(18.dp)
+                                    Text(
+                                        text = "Recent searches",
+                                        style = AuricleTheme.typography.headline,
+                                        color = AuricleTheme.colors.textPrimary
                                     )
                                     Text(
-                                        text = item,
-                                        style = AuricleTheme.typography.body,
-                                        color = AuricleTheme.colors.textPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        text = "Clear",
+                                        style = AuricleTheme.typography.subSB,
+                                        color = AuricleTheme.colors.accentStrong,
+                                        modifier = Modifier
+                                            .clickable {
+                                                settingsRepo.clearRecentSearches()
+                                                dismissedRecentSearches = emptySet()
+                                                searchPrefs.edit().remove(KEY_DISMISSED_RECENT_SEARCHES).apply()
+                                            }
+                                            .padding(4.dp)
                                     )
                                 }
                             }
+                            itemsIndexed(recentList, key = { idx, term -> "active-recent-$term-$idx" }) { _, term ->
+                                SearchSuggestionRow(
+                                    suggestion = term,
+                                    leadingIcon = AuricleIcons.Clock,
+                                    onSelect = {
+                                        textFieldSelection = TextRange(term.length)
+                                        updateQuery(term)
+                                        executeSearch(term, selectedCategory)
+                                    },
+                                    onFillQuery = {
+                                        hasSubmittedExactQuery = false
+                                        textFieldSelection = TextRange(term.length)
+                                        updateQuery(term)
+                                        isSearchActive = true
+                                        runCatching { focusRequester.requestFocus() }
+                                        keyboardController?.show()
+                                    }
+                                )
+                            }
                         }
-                    } else if (searchResults != null) {
-                        val res = searchResults!!
-                        val hasVisibleResults = when (selectedCategory) {
+                    } else {
+                        val hasVisibleResults = if (res == null) false else when (selectedCategory) {
                             "Songs" -> res.songs.isNotEmpty()
                             "Albums" -> res.albums.isNotEmpty()
                             "Artists" -> res.artists.isNotEmpty()
@@ -703,7 +838,7 @@ fun SearchScreen(
                                 res.playlists.isNotEmpty()
                         }
 
-                        if (!hasVisibleResults) {
+                        if (res != null && !hasVisibleResults && !showSuggestions && !isLiveSearching) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -723,375 +858,498 @@ fun SearchScreen(
                         } else {
                             LazyColumn(
                                 modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(bottom = bottomContentPadding),
-                                verticalArrangement = Arrangement.spacedBy(20.dp)
+                                contentPadding = PaddingValues(top = 4.dp, bottom = bottomContentPadding),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
                             ) {
-                                // Corrected Query Notice
-                                if (!res.correctedQuery.isNullOrBlank()) {
-                                    item {
-                                        Text(
-                                            text = "Showing results for \"${res.correctedQuery}\"",
-                                            style = AuricleTheme.typography.subSB,
-                                            color = AuricleTheme.colors.accentStrong,
-                                            modifier = Modifier.padding(horizontal = 20.dp)
-                                        )
+                                // Subtle inline progress row during incremental typing or background category refresh
+                                if (isLiveSearching || isLoading) {
+                                    item(key = "live-searching-indicator") {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 20.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                strokeWidth = 2.dp,
+                                                color = AuricleTheme.colors.accentStrong
+                                            )
+                                            Text(
+                                                text = "Searching…",
+                                                style = AuricleTheme.typography.sub,
+                                                color = AuricleTheme.colors.textMuted
+                                            )
+                                        }
                                     }
                                 }
 
-                                // 1. Top Result Card (in "All" category)
-                                if (selectedCategory == "All" && (res.topResult != null || res.artists.isNotEmpty())) {
-                                    val topArtist = res.artists.firstOrNull()
-                                    val topSong = res.topResult
-
-                                    item {
-                                        Column(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 20.dp),
-                                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Text(
-                                                text = "Top result",
-                                                style = AuricleTheme.typography.headline,
-                                                color = AuricleTheme.colors.textPrimary
-                                            )
-
-                                            if (topSong != null) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(104.dp)
-                                                        .clip(RoundedCornerShape(16.dp))
-                                                        .background(AuricleTheme.colors.surface2)
-                                                        .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
-                                                        .auriclePressClickable(
-                                                            onClick = {
-                                                                playbackController.playTrack(
-                                                                    topSong,
-                                                                    listOf(topSong),
-                                                                    "Search"
-                                                                )
-                                                            },
-                                                            onLongClick = { onSongOptionsClick(topSong) },
-                                                            onLongClickLabel = "More options"
-                                                        )
-                                                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    AsyncImage(
-                                                        model = ImageRequest.Builder(LocalContext.current)
-                                                            .data(topSong.displayArtworkUrl)
-                                                            .crossfade(true)
-                                                            .build(),
-                                                        contentDescription = null,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier
-                                                            .size(72.dp)
-                                                            .clip(RoundedCornerShape(10.dp))
-                                                            .background(AuricleTheme.colors.surface)
-                                                    )
-                                                    Spacer(Modifier.width(14.dp))
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(
-                                                            text = topSong.title,
-                                                            style = AuricleTheme.typography.title2,
-                                                            color = AuricleTheme.colors.textPrimary,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                        Spacer(Modifier.height(2.dp))
-                                                        Text(
-                                                            text = "Song · ${topSong.artist}",
-                                                            style = AuricleTheme.typography.sub,
-                                                            color = AuricleTheme.colors.textMuted,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                    }
-                                                    Spacer(Modifier.width(4.dp))
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .minimumInteractiveComponentSize()
-                                                            .size(36.dp)
-                                                            .clip(CircleShape)
-                                                            .auriclePressClickable(onClick = { onSongOptionsClick(topSong) })
-                                                            .semantics {
-                                                                contentDescription = "More options for ${topSong.title}"
-                                                            },
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = AuricleIcons.MoreVertical,
-                                                            contentDescription = null,
-                                                            tint = AuricleTheme.colors.textMuted,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                    }
-                                                    Spacer(Modifier.width(4.dp))
-                                                    AuricleCircleIconButton(
-                                                        icon = AuricleIcons.Play,
-                                                        contentDescription = "Play",
-                                                        size = 44.dp,
-                                                        iconSize = 18.dp,
-                                                        containerColor = AuricleTheme.colors.primaryFill,
-                                                        tint = AuricleTheme.colors.onPrimaryFill,
-                                                        onClick = {
-                                                            playbackController.playTrack(
-                                                                topSong,
-                                                                listOf(topSong),
-                                                                "Search"
-                                                            )
+                                // Top 4 compact autocomplete suggestion rows while typing
+                                if (showSuggestions) {
+                                    item(key = "suggestions-block") {
+                                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            suggestions.take(4).forEachIndexed { idx, item ->
+                                                key("suggestion-$idx-$item") {
+                                                    SearchSuggestionRow(
+                                                        suggestion = item,
+                                                        leadingIcon = AuricleIcons.Search,
+                                                        onSelect = {
+                                                            textFieldSelection = TextRange(item.length)
+                                                            updateQuery(item)
+                                                            executeSearch(item, selectedCategory)
+                                                        },
+                                                        onFillQuery = {
+                                                            hasSubmittedExactQuery = false
+                                                            textFieldSelection = TextRange(item.length)
+                                                            updateQuery(item)
+                                                            isSearchActive = true
+                                                            runCatching { focusRequester.requestFocus() }
+                                                            keyboardController?.show()
                                                         }
                                                     )
-                                                }
-                                            } else if (topArtist != null) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(104.dp)
-                                                        .clip(RoundedCornerShape(16.dp))
-                                                        .background(AuricleTheme.colors.surface2)
-                                                        .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
-                                                        .auriclePressClickable(
-                                                            onClick = { onArtistClick(topArtist) },
-                                                            onLongClick = onArtistLongClick?.let { cb -> { cb(topArtist) } },
-                                                            onLongClickLabel = "Artist options"
-                                                        )
-                                                        .padding(16.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    AsyncImage(
-                                                        model = ImageRequest.Builder(LocalContext.current)
-                                                            .data(topArtist.thumbnailUrl)
-                                                            .crossfade(true)
-                                                            .build(),
-                                                        contentDescription = null,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier
-                                                            .size(72.dp)
-                                                            .clip(CircleShape)
-                                                            .background(AuricleTheme.colors.surface)
-                                                    )
-                                                    Spacer(Modifier.width(14.dp))
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Text(
-                                                            text = topArtist.name,
-                                                            style = AuricleTheme.typography.title2,
-                                                            color = AuricleTheme.colors.textPrimary,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                        Spacer(Modifier.height(2.dp))
-                                                        Text(
-                                                            text = "Artist",
-                                                            style = AuricleTheme.typography.sub,
-                                                            color = AuricleTheme.colors.textMuted
-                                                        )
-                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
 
-                                // 2. Songs Section
-                                if (res.songs.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Songs")) {
-                                    val songsToShow = if (selectedCategory == "All") res.songs.take(5) else res.songs
-                                    item {
-                                        Column {
-                                            AuricleSectionHeader(
-                                                title = "Songs",
-                                                showChevron = false,
-                                                modifier = Modifier.padding(horizontal = 20.dp)
-                                            )
-                                            songsToShow.forEachIndexed { idx, song ->
-                                                SongRow(
-                                                    song = song,
-                                                    isPlaying = currentPlayingTrack?.videoId == song.videoId,
-                                                    isActivelyPlaying = isPlaying,
-                                                    onClick = {
-                                                        playbackController.playTrack(song, res.songs, "Search Results")
-                                                    },
-                                                    onQuickAddQueue = {
-                                                        playbackController.addToQueue(song)
-                                                    },
-                                                    onOptionsClick = {
-                                                        onSongOptionsClick(song)
-                                                    },
-                                                    showDivider = idx < songsToShow.lastIndex
+                                if (res != null) {
+                                    if (!hasVisibleResults) {
+                                        if (!isLiveSearching && !isLoading) {
+                                            item(key = "no-results-inline") {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 24.dp, vertical = 32.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    AuricleStateCard(
+                                                        icon = AuricleIcons.Search,
+                                                        title = "No results found",
+                                                        subtitle = if (selectedCategory == "All") {
+                                                            "Try a different song, album, or artist."
+                                                        } else {
+                                                            "No ${selectedCategory.lowercase()} matched \"${query.trim()}\"."
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Corrected Query Notice
+                                        if (!res.correctedQuery.isNullOrBlank()) {
+                                            item(key = "corrected-query") {
+                                                Text(
+                                                    text = "Showing results for \"${res.correctedQuery}\"",
+                                                    style = AuricleTheme.typography.subSB,
+                                                    color = AuricleTheme.colors.accentStrong,
+                                                    modifier = Modifier.padding(horizontal = 20.dp)
                                                 )
                                             }
                                         }
-                                    }
-                                }
 
-                                // 3. Albums Section
-                                if (res.albums.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Albums")) {
-                                    item {
-                                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            AuricleSectionHeader(
-                                                title = "Albums",
-                                                showChevron = false,
-                                                modifier = Modifier.padding(horizontal = 20.dp)
-                                            )
-                                            if (selectedCategory == "All") {
-                                                LazyRow(
-                                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                        // 1. Typed Top Result Card (in "All" category)
+                                        if (selectedCategory == "All" && (res.topResult != null || res.artists.isNotEmpty())) {
+                                            val top = res.topResult
+                                            val fallbackArtist = if (top == null) res.artists.firstOrNull() else null
+
+                                            item(key = "top-result-section") {
+                                                Column(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 20.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                                 ) {
-                                                    itemsIndexed(
-                                                        res.albums,
-                                                        key = { idx, album -> "search-album-${album.browseId.ifBlank { album.title }}-$idx" }
-                                                    ) { _, album ->
-                                                        AlbumCard(
-                                                            title = album.title,
-                                                            subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
-                                                            artworkUrl = album.thumbnailUrl,
-                                                            onClick = { onAlbumClick(album) },
-                                                            onLongClick = onAlbumLongClick?.let { cb -> { cb(album) } },
-                                                            width = 160.dp,
-                                                            artworkModifier = albumArtworkModifier(album)
+                                                    Text(
+                                                        text = "Top result",
+                                                        style = AuricleTheme.typography.headline,
+                                                        color = AuricleTheme.colors.textPrimary
+                                                    )
+
+                                                    if (top != null) {
+                                                        when (top.kind.lowercase()) {
+                                                            "artist" -> {
+                                                                val artistItem = top.toArtistItem()
+                                                                val subtitle = "Artist" + if (top.subtitle.isNotBlank()) " · ${top.subtitle}" else ""
+                                                                TopEntityResultCard(
+                                                                    title = artistItem.name.ifBlank { top.title },
+                                                                    subtitle = subtitle,
+                                                                    artworkUrl = top.displayArtworkUrl,
+                                                                    isCircular = true,
+                                                                    placeholderIcon = AuricleIcons.Artist,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onArtistClick(artistItem)
+                                                                    },
+                                                                    onLongClick = onArtistLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(artistItem)
+                                                                        }
+                                                                    },
+                                                                    onLongClickLabel = "Artist options"
+                                                                )
+                                                            }
+                                                            "album" -> {
+                                                                val albumItem = top.toAlbumItem()
+                                                                val artistLabel = albumItem.artist.ifBlank { top.subtitle }
+                                                                val subtitle = if (artistLabel.isNotBlank()) "Album · $artistLabel" else "Album"
+                                                                TopEntityResultCard(
+                                                                    title = albumItem.title,
+                                                                    subtitle = subtitle,
+                                                                    artworkUrl = top.displayArtworkUrl,
+                                                                    isCircular = false,
+                                                                    placeholderIcon = AuricleIcons.Music,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onAlbumClick(albumItem)
+                                                                    },
+                                                                    onLongClick = onAlbumLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(albumItem)
+                                                                        }
+                                                                    },
+                                                                    onLongClickLabel = "Album options"
+                                                                )
+                                                            }
+                                                            "playlist" -> {
+                                                                val playlistItem = top.toPlaylistItem()
+                                                                val subLabel = top.subtitle.ifBlank { playlistItem.author }
+                                                                val subtitle = if (subLabel.isNotBlank()) "Playlist · $subLabel" else "Playlist"
+                                                                TopEntityResultCard(
+                                                                    title = playlistItem.title,
+                                                                    subtitle = subtitle,
+                                                                    artworkUrl = top.displayArtworkUrl,
+                                                                    isCircular = false,
+                                                                    placeholderIcon = AuricleIcons.Music,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onPlaylistClick(playlistItem)
+                                                                    },
+                                                                    onLongClick = onPlaylistLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(playlistItem)
+                                                                        }
+                                                                    },
+                                                                    onLongClickLabel = "Playlist options"
+                                                                )
+                                                            }
+                                                            else -> {
+                                                                val topSong = top.toSongItem()
+                                                                TopSongResultCard(
+                                                                    song = topSong,
+                                                                    onPlay = {
+                                                                        commitSearchInteraction()
+                                                                        val playQueue = if (res.songs.any { it.videoId == topSong.videoId }) {
+                                                                            res.songs
+                                                                        } else {
+                                                                            listOf(topSong) + res.songs
+                                                                        }
+                                                                        playbackController.playTrack(
+                                                                            topSong,
+                                                                            playQueue,
+                                                                            "Search"
+                                                                        )
+                                                                    },
+                                                                    onMoreOptions = {
+                                                                        commitSearchInteraction()
+                                                                        onSongOptionsClick(topSong)
+                                                                    }
+                                                                )
+                                                            }
+                                                        }
+                                                    } else if (fallbackArtist != null) {
+                                                        val subtitle = "Artist" + if (fallbackArtist.subscribers.isNotBlank()) " · ${fallbackArtist.subscribers}" else ""
+                                                        TopEntityResultCard(
+                                                            title = fallbackArtist.name,
+                                                            subtitle = subtitle,
+                                                            artworkUrl = fallbackArtist.displayThumbnailUrl,
+                                                            isCircular = true,
+                                                            placeholderIcon = AuricleIcons.Artist,
+                                                            onClick = {
+                                                                commitSearchInteraction()
+                                                                onArtistClick(fallbackArtist)
+                                                            },
+                                                            onLongClick = onArtistLongClick?.let { cb ->
+                                                                {
+                                                                    commitSearchInteraction()
+                                                                    cb(fallbackArtist)
+                                                                }
+                                                            },
+                                                            onLongClickLabel = "Artist options"
                                                         )
                                                     }
                                                 }
-                                            } else {
-                                                // 2-column grid in Albums filter
-                                                val rows = res.albums.chunked(2)
-                                                rows.forEach { rowAlbums ->
-                                                    Row(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(horizontal = 20.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                                    ) {
-                                                        rowAlbums.forEach { album ->
-                                                            AlbumCard(
-                                                                title = album.title,
-                                                                subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
-                                                                artworkUrl = album.thumbnailUrl,
-                                                                onClick = { onAlbumClick(album) },
-                                                                onLongClick = onAlbumLongClick?.let { cb -> { cb(album) } },
-                                                                modifier = Modifier.weight(1f),
-                                                                artworkModifier = albumArtworkModifier(album)
-                                                            )
+                                            }
+                                        }
+
+                                        // 2. Songs Section (filter out top song if top.kind == "song" and > 1 songs)
+                                        val topSongId = if (res.topResult?.kind?.equals("song", ignoreCase = true) == true) {
+                                            res.topResult.videoId.ifBlank { res.topResult.id }
+                                        } else ""
+                                        val dedupedSongs = if (
+                                            selectedCategory == "All" &&
+                                            topSongId.isNotBlank() &&
+                                            res.songs.size > 1
+                                        ) {
+                                            res.songs.filterNot { it.videoId == topSongId }
+                                        } else {
+                                            res.songs
+                                        }
+
+                                        if (dedupedSongs.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Songs")) {
+                                            val songsToShow = if (selectedCategory == "All") dedupedSongs.take(5) else dedupedSongs
+                                            item(key = "songs-section") {
+                                                Column {
+                                                    AuricleSectionHeader(
+                                                        title = "Songs",
+                                                        showChevron = false,
+                                                        modifier = Modifier.padding(horizontal = 20.dp)
+                                                    )
+                                                    songsToShow.forEachIndexed { idx, song ->
+                                                        SongRow(
+                                                            song = song,
+                                                            isPlaying = currentPlayingTrack?.videoId == song.videoId,
+                                                            isActivelyPlaying = isPlaying,
+                                                            onClick = {
+                                                                commitSearchInteraction()
+                                                                playbackController.playTrack(song, res.songs, "Search Results")
+                                                            },
+                                                            onQuickAddQueue = {
+                                                                commitSearchInteraction()
+                                                                playbackController.addToQueue(song)
+                                                            },
+                                                            onOptionsClick = {
+                                                                commitSearchInteraction()
+                                                                onSongOptionsClick(song)
+                                                            },
+                                                            showDivider = idx < songsToShow.lastIndex
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // 3. Albums Section
+                                        if (res.albums.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Albums")) {
+                                            item(key = "albums-section") {
+                                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                    AuricleSectionHeader(
+                                                        title = "Albums",
+                                                        showChevron = false,
+                                                        modifier = Modifier.padding(horizontal = 20.dp)
+                                                    )
+                                                    if (selectedCategory == "All") {
+                                                        LazyRow(
+                                                            contentPadding = PaddingValues(horizontal = 20.dp),
+                                                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                        ) {
+                                                            itemsIndexed(
+                                                                res.albums,
+                                                                key = { idx, album -> "search-album-${album.browseId.ifBlank { album.title }}-$idx" }
+                                                            ) { _, album ->
+                                                                AlbumCard(
+                                                                    title = album.title,
+                                                                    subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
+                                                                    artworkUrl = album.displayThumbnailUrl,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onAlbumClick(album)
+                                                                    },
+                                                                    onLongClick = onAlbumLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(album)
+                                                                        }
+                                                                    },
+                                                                    width = 160.dp,
+                                                                    artworkModifier = albumArtworkModifier(album)
+                                                                )
+                                                            }
                                                         }
-                                                        if (rowAlbums.size == 1) {
-                                                            Spacer(Modifier.weight(1f))
+                                                    } else {
+                                                        // 2-column grid in Albums filter
+                                                        val rows = res.albums.chunked(2)
+                                                        rows.forEach { rowAlbums ->
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(horizontal = 20.dp),
+                                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                            ) {
+                                                                rowAlbums.forEach { album ->
+                                                                    AlbumCard(
+                                                                        title = album.title,
+                                                                        subtitle = if (album.year.isNotBlank()) "Album · ${album.artist}" else album.artist,
+                                                                        artworkUrl = album.displayThumbnailUrl,
+                                                                        onClick = {
+                                                                            commitSearchInteraction()
+                                                                            onAlbumClick(album)
+                                                                        },
+                                                                        onLongClick = onAlbumLongClick?.let { cb ->
+                                                                            {
+                                                                                commitSearchInteraction()
+                                                                                cb(album)
+                                                                            }
+                                                                        },
+                                                                        modifier = Modifier.weight(1f),
+                                                                        artworkModifier = albumArtworkModifier(album)
+                                                                    )
+                                                                }
+                                                                if (rowAlbums.size == 1) {
+                                                                    Spacer(Modifier.weight(1f))
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                }
 
-                                // 4. Artists Section
-                                if (res.artists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Artists")) {
-                                    item {
-                                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            AuricleSectionHeader(
-                                                title = "Artists",
-                                                showChevron = false,
-                                                modifier = Modifier.padding(horizontal = 20.dp)
-                                            )
-                                            if (selectedCategory == "All") {
-                                                LazyRow(
-                                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                                ) {
-                                                    itemsIndexed(
-                                                        res.artists,
-                                                        key = { idx, artist -> "search-artist-${artist.browseId.ifBlank { artist.name }}-$idx" }
-                                                    ) { _, artist ->
-                                                        ArtistCircleCard(
-                                                            name = artist.name,
-                                                            artworkUrl = artist.thumbnailUrl,
-                                                            onClick = { onArtistClick(artist) },
-                                                            onLongClick = onArtistLongClick?.let { cb -> { cb(artist) } },
-                                                            size = 96.dp
-                                                        )
-                                                    }
-                                                }
-                                            } else {
-                                                // 2-column grid in Artists filter
-                                                val rows = res.artists.chunked(2)
-                                                rows.forEach { rowArtists ->
-                                                    Row(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(horizontal = 20.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                                    ) {
-                                                        rowArtists.forEach { artist ->
-                                                            ArtistCircleCard(
-                                                                name = artist.name,
-                                                                artworkUrl = artist.thumbnailUrl,
-                                                                onClick = { onArtistClick(artist) },
-                                                                onLongClick = onArtistLongClick?.let { cb -> { cb(artist) } },
-                                                                size = 128.dp,
-                                                                modifier = Modifier.weight(1f)
-                                                            )
+                                        // 4. Artists Section
+                                        if (res.artists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Artists")) {
+                                            item(key = "artists-section") {
+                                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                    AuricleSectionHeader(
+                                                        title = "Artists",
+                                                        showChevron = false,
+                                                        modifier = Modifier.padding(horizontal = 20.dp)
+                                                    )
+                                                    if (selectedCategory == "All") {
+                                                        LazyRow(
+                                                            contentPadding = PaddingValues(horizontal = 20.dp),
+                                                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                        ) {
+                                                            itemsIndexed(
+                                                                res.artists,
+                                                                key = { idx, artist -> "search-artist-${artist.browseId.ifBlank { artist.name }}-$idx" }
+                                                            ) { _, artist ->
+                                                                ArtistCircleCard(
+                                                                    name = artist.name,
+                                                                    artworkUrl = artist.displayThumbnailUrl,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onArtistClick(artist)
+                                                                    },
+                                                                    onLongClick = onArtistLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(artist)
+                                                                        }
+                                                                    },
+                                                                    size = 96.dp
+                                                                )
+                                                            }
                                                         }
-                                                        if (rowArtists.size == 1) {
-                                                            Spacer(Modifier.weight(1f))
+                                                    } else {
+                                                        // 2-column grid in Artists filter
+                                                        val rows = res.artists.chunked(2)
+                                                        rows.forEach { rowArtists ->
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(horizontal = 20.dp),
+                                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                            ) {
+                                                                rowArtists.forEach { artist ->
+                                                                    ArtistCircleCard(
+                                                                        name = artist.name,
+                                                                        artworkUrl = artist.displayThumbnailUrl,
+                                                                        onClick = {
+                                                                            commitSearchInteraction()
+                                                                            onArtistClick(artist)
+                                                                        },
+                                                                        onLongClick = onArtistLongClick?.let { cb ->
+                                                                            {
+                                                                                commitSearchInteraction()
+                                                                                cb(artist)
+                                                                            }
+                                                                        },
+                                                                        size = 128.dp,
+                                                                        modifier = Modifier.weight(1f)
+                                                                    )
+                                                                }
+                                                                if (rowArtists.size == 1) {
+                                                                    Spacer(Modifier.weight(1f))
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                }
 
-                                // 5. Playlists Section
-                                if (res.playlists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Playlists")) {
-                                    item {
-                                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            AuricleSectionHeader(
-                                                title = "Playlists",
-                                                showChevron = false,
-                                                modifier = Modifier.padding(horizontal = 20.dp)
-                                            )
-                                            if (selectedCategory == "All") {
-                                                LazyRow(
-                                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                                ) {
-                                                    itemsIndexed(
-                                                        res.playlists,
-                                                        key = { idx, playlist -> "search-playlist-${playlist.playlistId.ifBlank { playlist.title }}-$idx" }
-                                                    ) { _, playlist ->
-                                                        AlbumCard(
-                                                            title = playlist.title,
-                                                            subtitle = "Playlist · ${playlist.author}",
-                                                            artworkUrl = playlist.thumbnailUrl,
-                                                            onClick = { onPlaylistClick(playlist) },
-                                                            onLongClick = onPlaylistLongClick?.let { cb -> { cb(playlist) } },
-                                                            width = 160.dp
-                                                        )
-                                                    }
-                                                }
-                                            } else {
-                                                // 2-column grid in Playlists filter
-                                                val rows = res.playlists.chunked(2)
-                                                rows.forEach { rowPlaylists ->
-                                                    Row(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(horizontal = 20.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                                    ) {
-                                                        rowPlaylists.forEach { playlist ->
-                                                            AlbumCard(
-                                                                title = playlist.title,
-                                                                subtitle = "Playlist · ${playlist.author}",
-                                                                artworkUrl = playlist.thumbnailUrl,
-                                                                onClick = { onPlaylistClick(playlist) },
-                                                                onLongClick = onPlaylistLongClick?.let { cb -> { cb(playlist) } },
-                                                                modifier = Modifier.weight(1f)
-                                                            )
+                                        // 5. Playlists Section
+                                        if (res.playlists.isNotEmpty() && (selectedCategory == "All" || selectedCategory == "Playlists")) {
+                                            item(key = "playlists-section") {
+                                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                    AuricleSectionHeader(
+                                                        title = "Playlists",
+                                                        showChevron = false,
+                                                        modifier = Modifier.padding(horizontal = 20.dp)
+                                                    )
+                                                    if (selectedCategory == "All") {
+                                                        LazyRow(
+                                                            contentPadding = PaddingValues(horizontal = 20.dp),
+                                                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                        ) {
+                                                            itemsIndexed(
+                                                                res.playlists,
+                                                                key = { idx, playlist -> "search-playlist-${playlist.playlistId.ifBlank { playlist.title }}-$idx" }
+                                                            ) { _, playlist ->
+                                                                AlbumCard(
+                                                                    title = playlist.title,
+                                                                    subtitle = if (playlist.author.isNotBlank()) "Playlist · ${playlist.author}" else "Playlist",
+                                                                    artworkUrl = playlist.displayThumbnailUrl,
+                                                                    onClick = {
+                                                                        commitSearchInteraction()
+                                                                        onPlaylistClick(playlist)
+                                                                    },
+                                                                    onLongClick = onPlaylistLongClick?.let { cb ->
+                                                                        {
+                                                                            commitSearchInteraction()
+                                                                            cb(playlist)
+                                                                        }
+                                                                    },
+                                                                    width = 160.dp
+                                                                )
+                                                            }
                                                         }
-                                                        if (rowPlaylists.size == 1) {
-                                                            Spacer(Modifier.weight(1f))
+                                                    } else {
+                                                        // 2-column grid in Playlists filter
+                                                        val rows = res.playlists.chunked(2)
+                                                        rows.forEach { rowPlaylists ->
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(horizontal = 20.dp),
+                                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                                            ) {
+                                                                rowPlaylists.forEach { playlist ->
+                                                                    AlbumCard(
+                                                                        title = playlist.title,
+                                                                        subtitle = if (playlist.author.isNotBlank()) "Playlist · ${playlist.author}" else "Playlist",
+                                                                        artworkUrl = playlist.displayThumbnailUrl,
+                                                                        onClick = {
+                                                                            commitSearchInteraction()
+                                                                            onPlaylistClick(playlist)
+                                                                        },
+                                                                        onLongClick = onPlaylistLongClick?.let { cb ->
+                                                                            {
+                                                                                commitSearchInteraction()
+                                                                                cb(playlist)
+                                                                            }
+                                                                        },
+                                                                        modifier = Modifier.weight(1f)
+                                                                    )
+                                                                }
+                                                                if (rowPlaylists.size == 1) {
+                                                                    Spacer(Modifier.weight(1f))
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1120,5 +1378,253 @@ fun SearchScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SearchSuggestionRow(
+    suggestion: String,
+    leadingIcon: ImageVector,
+    onSelect: () -> Unit,
+    onFillQuery: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .heightIn(min = 44.dp)
+            .clip(RoundedCornerShape(10.dp)),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 44.dp)
+                .clickable(onClick = onSelect)
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = leadingIcon,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textMuted,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = suggestion,
+                style = AuricleTheme.typography.body,
+                color = AuricleTheme.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Box(
+            modifier = Modifier
+                .minimumInteractiveComponentSize()
+                .size(36.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onFillQuery)
+                .semantics { contentDescription = "Fill search query" },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.ArrowUpLeft,
+                contentDescription = "Fill search query",
+                tint = AuricleTheme.colors.textMuted,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TopEntityResultCard(
+    title: String,
+    subtitle: String,
+    artworkUrl: String,
+    isCircular: Boolean,
+    placeholderIcon: ImageVector,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    onLongClickLabel: String
+) {
+    val context = LocalContext.current
+    val artShape = if (isCircular) CircleShape else RoundedCornerShape(10.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(104.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AuricleTheme.colors.surface2)
+            .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
+            .auriclePressClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onLongClickLabel = onLongClickLabel
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(artShape)
+                .background(AuricleTheme.colors.surface),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = placeholderIcon,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textDim.copy(alpha = 0.5f),
+                modifier = Modifier.size(28.dp)
+            )
+            if (artworkUrl.isNotBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(artworkUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = AuricleTheme.typography.title2,
+                color = AuricleTheme.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                style = AuricleTheme.typography.sub,
+                color = AuricleTheme.colors.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(AuricleTheme.colors.fillSoft),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.ChevronRight,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textMuted,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TopSongResultCard(
+    song: SongItem,
+    onPlay: () -> Unit,
+    onMoreOptions: () -> Unit
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(104.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AuricleTheme.colors.surface2)
+            .border(1.dp, AuricleTheme.colors.borderSoft, RoundedCornerShape(16.dp))
+            .auriclePressClickable(
+                onClick = onPlay,
+                onLongClick = onMoreOptions,
+                onLongClickLabel = "More options"
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(AuricleTheme.colors.surface),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.Music,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textDim.copy(alpha = 0.45f),
+                modifier = Modifier.size(28.dp)
+            )
+            if (song.displayArtworkUrl.isNotBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(song.displayArtworkUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = song.title,
+                style = AuricleTheme.typography.title2,
+                color = AuricleTheme.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            val sub = buildString {
+                append("Song")
+                if (song.artist.isNotBlank()) append(" · ${song.artist}")
+                if (song.displayDuration.isNotBlank()) append(" · ${song.displayDuration}")
+            }
+            Text(
+                text = sub,
+                style = AuricleTheme.typography.sub,
+                color = AuricleTheme.colors.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(Modifier.width(4.dp))
+        Box(
+            modifier = Modifier
+                .minimumInteractiveComponentSize()
+                .size(36.dp)
+                .clip(CircleShape)
+                .auriclePressClickable(onClick = onMoreOptions)
+                .semantics {
+                    contentDescription = "More options for ${song.title}"
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = AuricleIcons.MoreVertical,
+                contentDescription = null,
+                tint = AuricleTheme.colors.textMuted,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(Modifier.width(4.dp))
+        AuricleCircleIconButton(
+            icon = AuricleIcons.Play,
+            contentDescription = "Play",
+            size = 44.dp,
+            iconSize = 18.dp,
+            containerColor = AuricleTheme.colors.primaryFill,
+            tint = AuricleTheme.colors.onPrimaryFill,
+            onClick = onPlay
+        )
     }
 }

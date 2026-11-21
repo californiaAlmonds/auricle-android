@@ -1,5 +1,6 @@
 package com.auricle.app.ui.components
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -43,6 +44,7 @@ fun FeaturedHeroPager(
     onPlayClick: (SongItem) -> Unit,
     onAddToQueueClick: (SongItem) -> Unit,
     onHeroLongClick: ((SongItem) -> Unit)? = null,
+    eyebrowText: String = "FEATURED PICK",
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty()) return
@@ -133,18 +135,40 @@ fun FeaturedHeroPager(
                     modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(song.displayArtworkUrl)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
+                    var useFallbackArt by remember(song.videoId, song.highResArtworkUrl) {
+                        mutableStateOf(false)
+                    }
+                    val artUrl = if (useFallbackArt) song.displayArtworkUrl else song.highResArtworkUrl
+                    Box(
                         modifier = Modifier
                             .size(128.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(AuricleTheme.colors.surface2)
-                    )
+                            .background(AuricleTheme.colors.surface2),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = AuricleIcons.Music,
+                            contentDescription = null,
+                            tint = AuricleTheme.colors.textDim.copy(alpha = 0.45f),
+                            modifier = Modifier.size(36.dp)
+                        )
+                        if (artUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(artUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                onError = {
+                                    if (!useFallbackArt && song.displayArtworkUrl.isNotBlank() && song.displayArtworkUrl != artUrl) {
+                                        useFallbackArt = true
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
 
                     Spacer(Modifier.width(16.dp))
 
@@ -153,7 +177,7 @@ fun FeaturedHeroPager(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            text = "MADE FOR YOUR TASTE",
+                            text = eyebrowText,
                             style = AuricleTheme.typography.overline,
                             color = artColor
                         )
@@ -194,7 +218,10 @@ fun FeaturedHeroPager(
                             AuricleCircleIconButton(
                                 icon = AuricleIcons.Plus,
                                 contentDescription = "Add to Queue",
-                                onClick = { onAddToQueueClick(song) },
+                                onClick = {
+                                    onAddToQueueClick(song)
+                                    Toast.makeText(context, "Added to queue", Toast.LENGTH_SHORT).show()
+                                },
                                 size = 36.dp,
                                 iconSize = 16.dp,
                                 containerColor = AuricleTheme.colors.fillMed,
@@ -236,6 +263,7 @@ fun HeroCard(
     onRefreshPick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -302,18 +330,40 @@ fun HeroCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Artwork (108dp)
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(song.displayArtworkUrl)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                var useFallbackArt by remember(song.videoId, song.highResArtworkUrl) {
+                    mutableStateOf(false)
+                }
+                val artUrl = if (useFallbackArt) song.displayArtworkUrl else song.highResArtworkUrl
+                Box(
                     modifier = Modifier
                         .size(108.dp)
                         .clip(RoundedCornerShape(14.dp))
-                        .background(AuricleTheme.colors.surface)
-                )
+                        .background(AuricleTheme.colors.surface),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = AuricleIcons.Music,
+                        contentDescription = null,
+                        tint = AuricleTheme.colors.textDim.copy(alpha = 0.45f),
+                        modifier = Modifier.size(32.dp)
+                    )
+                    if (artUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(artUrl)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            onError = {
+                                if (!useFallbackArt && song.displayArtworkUrl.isNotBlank() && song.displayArtworkUrl != artUrl) {
+                                    useFallbackArt = true
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
 
                 // Info & Action Buttons
                 Column(
@@ -360,7 +410,10 @@ fun HeroCard(
                         }
 
                         AccentPillButton(
-                            onClick = onQueueClick,
+                            onClick = {
+                                onQueueClick()
+                                Toast.makeText(context, "Added to queue", Toast.LENGTH_SHORT).show()
+                            },
                             isPrimary = false,
                             modifier = Modifier.semantics { contentDescription = "Add to Queue" }.testTag("QueueFeatured")
                         ) {

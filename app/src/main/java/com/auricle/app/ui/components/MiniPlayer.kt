@@ -112,18 +112,32 @@ fun MiniPlayer(
                 .padding(start = 11.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(track.displayArtworkUrl)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = "Album Art",
-                contentScale = ContentScale.Crop,
+            val artUrl = track.displayArtworkUrl
+            Box(
                 modifier = artworkModifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(AuricleTheme.colors.fillMed)
-            )
+                    .background(AuricleTheme.colors.fillMed),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = AuricleIcons.Music,
+                    contentDescription = null,
+                    tint = AuricleTheme.colors.textDim.copy(alpha = 0.6f),
+                    modifier = Modifier.size(20.dp)
+                )
+                if (artUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(LocalContext.current)
+                            .data(artUrl)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = "Album Art",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
 
             Spacer(Modifier.width(10.dp))
 

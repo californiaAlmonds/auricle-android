@@ -27,6 +27,15 @@ object AuricleNative {
     external fun nativeGetArtist(browseId: String): String
     external fun nativeGetPlaylist(playlistId: String): String
     external fun nativeGetLyrics(videoId: String, langMode: String): String
+    external fun nativeGetLyricsSynced(
+        videoId: String,
+        title: String,
+        artist: String,
+        album: String,
+        durationSecs: Int,
+        langMode: String
+    ): String
+    external fun nativeResolveArtists(kind: String, id: String, artistText: String): String
     external fun nativeResolveStream(videoId: String, forceRefresh: Boolean): String
     external fun nativeResolveStreamQuality(videoId: String, forceRefresh: Boolean, highQuality: Boolean): String
     external fun nativeClearStreamCache()

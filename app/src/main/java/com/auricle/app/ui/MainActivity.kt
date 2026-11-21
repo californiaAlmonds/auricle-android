@@ -4,8 +4,10 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.View
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
@@ -37,6 +40,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -52,13 +56,17 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.palette.graphics.Palette
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.auricle.app.AuricleApp
 import com.auricle.app.model.AlbumItem
+import com.auricle.app.model.ArtistCredit
 import com.auricle.app.model.ArtistItem
 import com.auricle.app.model.SearchResultData
 import com.auricle.app.model.SongItem
@@ -105,6 +113,9 @@ class MainActivity : ComponentActivity() {
                 android.graphics.Color.TRANSPARENT
             )
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.decorView.isForceDarkAllowed = false
+        }
 
         handleIntent(intent)
 
@@ -129,6 +140,7 @@ class MainActivity : ComponentActivity() {
             val hasPendingUpdate by updateRepo.hasPendingUpdate.collectAsState()
 
             var selectedTab by remember { mutableStateOf(NavigationTab.HOME) }
+            val homeListState = rememberLazyListState()
             val detailBackStack = remember { mutableStateListOf<DetailTarget>() }
             val activeDetailTarget = detailBackStack.lastOrNull()
             var searchFocusTrigger by remember { mutableIntStateOf(0) }
@@ -143,6 +155,7 @@ class MainActivity : ComponentActivity() {
             var showUpdaterSheet by remember { mutableStateOf(false) }
             var selectedSongForOptions by remember { mutableStateOf<SongItem?>(null) }
             var songOptionsPlaylistContext by remember { mutableStateOf<UserPlaylist?>(null) }
+            var songOptionsStartInArtistPicker by remember { mutableStateOf(false) }
             var selectedItemForOptions by remember { mutableStateOf<ContextMenuItem?>(null) }
 
             val scope = rememberCoroutineScope()
@@ -208,6 +221,24 @@ class MainActivity : ComponentActivity() {
             fun popDetail() {
                 if (detailBackStack.isNotEmpty()) {
                     detailBackStack.removeAt(detailBackStack.lastIndex)
+                }
+            }
+
+            fun navigateToArtistCredit(credit: ArtistCredit) {
+                selectedSongForOptions = null
+                selectedItemForOptions = null
+                songOptionsStartInArtistPicker = false
+                songOptionsPlaylistContext = null
+                showNowPlayingSheet = false
+                if (credit.name.isNotBlank() || credit.browseId.isNotBlank()) {
+                    pushDetail(
+                        DetailTarget.Artist(
+                            ArtistItem(
+                                browseId = credit.browseId,
+                                name = credit.name
+                            )
+                        )
+                    )
                 }
             }
 
@@ -302,6 +333,7 @@ class MainActivity : ComponentActivity() {
                         selectedSongForOptions != null -> {
                             selectedSongForOptions = null
                             songOptionsPlaylistContext = null
+                            songOptionsStartInArtistPicker = false
                         }
                         showPartySheet -> {
                             prefilledPartyLink = ""
@@ -359,6 +391,7 @@ class MainActivity : ComponentActivity() {
                                             onBackClick = { popDetail() },
                                             onSongOptionsClick = {
                                                 songOptionsPlaylistContext = null
+                                                songOptionsStartInArtistPicker = false
                                                 selectedSongForOptions = it
                                             },
                                             onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
@@ -370,6 +403,7 @@ class MainActivity : ComponentActivity() {
                                             onAlbumLongClick = { selectedItemForOptions = ContextMenuItem.Album(it) },
                                             onPlaylistSongOptionsClick = { song, playlist ->
                                                 songOptionsPlaylistContext = playlist
+                                                songOptionsStartInArtistPicker = false
                                                 selectedSongForOptions = song
                                             },
                                             onItemOptionsClick = { selectedItemForOptions = it },
@@ -384,10 +418,12 @@ class MainActivity : ComponentActivity() {
                                                     playbackController = playbackController,
                                                     partySnapshot = partySnapshot,
                                                     hasUpdateBadge = hasPendingUpdate,
+                                                    listState = homeListState,
                                                     onPartyClick = { showPartySheet = true },
                                                     onSettingsClick = { showSettingsSheet = true },
                                                     onSongOptionsClick = {
                                                         songOptionsPlaylistContext = null
+                                                        songOptionsStartInArtistPicker = false
                                                         selectedSongForOptions = it
                                                     },
                                                     onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
@@ -405,6 +441,7 @@ class MainActivity : ComponentActivity() {
                                                     playbackController = playbackController,
                                                     onSongOptionsClick = {
                                                         songOptionsPlaylistContext = null
+                                                        songOptionsStartInArtistPicker = false
                                                         selectedSongForOptions = it
                                                     },
                                                     onAlbumClick = { pushDetail(DetailTarget.Album(it)) },
@@ -430,6 +467,7 @@ class MainActivity : ComponentActivity() {
                                                     playbackController = playbackController,
                                                     onSongOptionsClick = {
                                                         songOptionsPlaylistContext = null
+                                                        songOptionsStartInArtistPicker = false
                                                         selectedSongForOptions = it
                                                     },
                                                     onUserPlaylistClick = { pushDetail(DetailTarget.CustomUserPlaylist(it)) },
@@ -560,7 +598,18 @@ class MainActivity : ComponentActivity() {
                                     onPartyClick = { showPartySheet = true },
                                     onSongOptionsClick = {
                                         songOptionsPlaylistContext = null
+                                        songOptionsStartInArtistPicker = false
                                         selectedSongForOptions = it
+                                    },
+                                    onArtistClick = { track ->
+                                        val credits = track.parsedArtistCredits()
+                                        if (credits.size == 1 && credits.first().browseId.isNotBlank()) {
+                                            navigateToArtistCredit(credits.first())
+                                        } else if (track.artist.isNotBlank() || track.artistId.isNotBlank() || credits.isNotEmpty()) {
+                                            songOptionsPlaylistContext = null
+                                            songOptionsStartInArtistPicker = true
+                                            selectedSongForOptions = track
+                                        }
                                     },
                                     artworkModifier = npArtMod
                                 )
@@ -583,6 +632,7 @@ class MainActivity : ComponentActivity() {
                         scrimColor = AuricleTheme.colors.scrim,
                         dragHandle = { AuricleSheetGrabber() }
                     ) {
+                        ConfigureModalSheetBars()
                         PartySheet(
                             playbackController = playbackController,
                             settingsRepo = settingsRepo,
@@ -623,6 +673,7 @@ class MainActivity : ComponentActivity() {
                         scrimColor = AuricleTheme.colors.scrim,
                         dragHandle = { AuricleSheetGrabber() }
                     ) {
+                        ConfigureModalSheetBars()
                         SettingsSheet(
                             settingsRepo = settingsRepo,
                             availableUpdateVersion = availableVer,
@@ -656,6 +707,7 @@ class MainActivity : ComponentActivity() {
                         onDismissRequest = {
                             selectedSongForOptions = null
                             songOptionsPlaylistContext = null
+                            songOptionsStartInArtistPicker = false
                         },
                         sheetState = optionsSheetState,
                         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -663,10 +715,13 @@ class MainActivity : ComponentActivity() {
                         scrimColor = AuricleTheme.colors.scrim,
                         dragHandle = { AuricleSheetGrabber() }
                     ) {
+                        ConfigureModalSheetBars()
                         SongOptionBottomSheet(
                             song = song,
                             playbackController = playbackController,
                             libraryRepo = libraryRepo,
+                            musicRepo = musicRepo,
+                            startInArtistPicker = songOptionsStartInArtistPicker,
                             playlistContextName = activePlaylistCtx?.name,
                             onRemoveFromPlaylist = activePlaylistCtx?.let { pl ->
                                 { libraryRepo.removeFromPlaylist(pl.id, song.videoId) }
@@ -674,10 +729,12 @@ class MainActivity : ComponentActivity() {
                             onDismiss = {
                                 selectedSongForOptions = null
                                 songOptionsPlaylistContext = null
+                                songOptionsStartInArtistPicker = false
                             },
                             onGoToAlbum = { targetSong ->
                                 selectedSongForOptions = null
                                 songOptionsPlaylistContext = null
+                                songOptionsStartInArtistPicker = false
                                 if (targetSong.album.isNotBlank() || targetSong.albumId.isNotBlank()) {
                                     showNowPlayingSheet = false
                                     pushDetail(
@@ -693,20 +750,15 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onGoToArtist = { targetSong ->
-                                selectedSongForOptions = null
-                                songOptionsPlaylistContext = null
-                                if (targetSong.artist.isNotBlank() || targetSong.artistId.isNotBlank()) {
-                                    showNowPlayingSheet = false
-                                    pushDetail(
-                                        DetailTarget.Artist(
-                                            ArtistItem(
-                                                browseId = targetSong.artistId,
-                                                name = targetSong.artist,
-                                                thumbnailUrl = targetSong.displayArtworkUrl
-                                            )
-                                        )
+                                navigateToArtistCredit(
+                                    ArtistCredit(
+                                        name = targetSong.artist,
+                                        browseId = targetSong.artistId
                                     )
-                                }
+                                )
+                            },
+                            onGoToArtistCredit = { credit ->
+                                navigateToArtistCredit(credit)
                             }
                         )
                     }
@@ -808,6 +860,7 @@ class MainActivity : ComponentActivity() {
                     ItemOptionBottomSheet(
                         item = effectiveItem,
                         isSavedOrFollowed = isSavedOrFollowed,
+                        musicRepo = musicRepo,
                         onDismiss = { selectedItemForOptions = null },
                         onPlay = {
                             scope.launch {
@@ -855,6 +908,7 @@ class MainActivity : ComponentActivity() {
                         onOpenDetail = if (alreadyOnTargetDetail) null else {
                             { pushDetail(targetDetailForItem) }
                         },
+                        onGoToArtistCredit = { navigateToArtistCredit(it) },
                         onRenamePlaylist = if (effectiveItem is ContextMenuItem.LocalPlaylist) {
                             { newName -> libraryRepo.renamePlaylist(effectiveItem.playlist.id, newName) }
                         } else null,
@@ -922,6 +976,7 @@ class MainActivity : ComponentActivity() {
                         scrimColor = AuricleTheme.colors.scrim,
                         dragHandle = { AuricleSheetGrabber() }
                     ) {
+                        ConfigureModalSheetBars()
                         UpdaterSheet(
                             updateState = updateState,
                             onDownloadClick = { updateRepo.downloadUpdate() },
@@ -969,6 +1024,34 @@ class MainActivity : ComponentActivity() {
             val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!sharedText.isNullOrBlank()) {
                 pendingPartyLink = sharedText.trim()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConfigureModalSheetBars() {
+    val isDark = AuricleTheme.colors.isDark
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            var parent = view.parent
+            var dialogWindow: android.view.Window? = null
+            while (parent != null) {
+                if (parent is DialogWindowProvider) {
+                    dialogWindow = parent.window
+                    break
+                }
+                parent = (parent as? View)?.parent
+            }
+            if (dialogWindow != null) {
+                WindowInsetsControllerCompat(dialogWindow, view).apply {
+                    isAppearanceLightStatusBars = !isDark
+                    isAppearanceLightNavigationBars = !isDark
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    dialogWindow.decorView.isForceDarkAllowed = false
+                }
             }
         }
     }

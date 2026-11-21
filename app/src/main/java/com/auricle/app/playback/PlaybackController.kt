@@ -3,6 +3,7 @@ package com.auricle.app.playback
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.*
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
@@ -37,6 +39,16 @@ class PlaybackController(
     private val settingsRepo: SettingsRepository? = null,
     private val coroutineScope: CoroutineScope
 ) {
+    companion object {
+        private const val AUTOPLAY_TARGET = 15
+        private const val AUTOPLAY_MAX = 25
+        private const val AUTOPLAY_REFILL_THRESHOLD = 6
+        private const val SESSION_HISTORY_MAX = 50
+        private const val TASTE_AFFINITY_BIAS = 2.5f
+        private const val RECENTLY_PLAYED_DEDUP_LIMIT = 30
+        const val SLEEP_TIMER_END_OF_TRACK = -1L
+    }
+
     private val TAG = "PlaybackController"
     private val json = Json {
         ignoreUnknownKeys = true
@@ -62,6 +74,7 @@ class PlaybackController(
     private val _duration = MutableStateFlow(0L)
     val duration: StateFlow<Long> = _duration.asStateFlow()
 
+    // Strictly User Queue (currentTrack + upcoming user queue; NEVER polluted with autoplay items)
     private val _queue = MutableStateFlow<List<SongItem>>(emptyList())
     val queue: StateFlow<List<SongItem>> = _queue.asStateFlow()
 
@@ -77,11 +90,20 @@ class PlaybackController(
     private val _playingFrom = MutableStateFlow("Queue")
     val playingFrom: StateFlow<String> = _playingFrom.asStateFlow()
 
-    private val _autoplayCandidates = MutableStateFlow<List<SongItem>>(emptyList())
-    val autoplayCandidates: StateFlow<List<SongItem>> = _autoplayCandidates.asStateFlow()
+    // Dedicated Persistent Autoplay Queue (Windows Auricle parity)
+    private val _autoplayQueue = MutableStateFlow<List<SongItem>>(emptyList())
+    val autoplayCandidates: StateFlow<List<SongItem>> = _autoplayQueue.asStateFlow()
+    val autoplayQueue: StateFlow<List<SongItem>> = _autoplayQueue.asStateFlow()
+
+    private val _isLoadingAutoplay = MutableStateFlow(false)
+    val isLoadingAutoplay: StateFlow<Boolean> = _isLoadingAutoplay.asStateFlow()
 
     private val _playbackError = MutableStateFlow<String?>(null)
     val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
+
+    // Sleep Timer: null = off, > 0 = countdown ms, -1L = End of current track
+    private val _sleepTimerRemainingMs = MutableStateFlow<Long?>(null)
+    val sleepTimerRemainingMs: StateFlow<Long?> = _sleepTimerRemainingMs.asStateFlow()
 
     // Party State
     private val _partySnapshot = MutableStateFlow(PartySnapshot())
@@ -94,9 +116,17 @@ class PlaybackController(
     private var unshuffledQueue: List<SongItem> = emptyList()
     private var streamResolveJob: Job? = null
     private var autoplayFetchJob: Job? = null
+    private var autoplayRefillJob: Job? = null
     private var autoplayAdvanceJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private val partyActionDispatcher = Dispatchers.IO.limitedParallelism(1)
+
+    // Autoplay & Session History State
+    private var autoplaySeed: String = ""
+    private var autoplayGeneration: Long = 0L
+    private var isRefillingAutoplay: Boolean = false
+    private val sessionHistory = ArrayDeque<SongItem>()
 
     private data class PendingPlayback(
         val song: SongItem,
@@ -124,6 +154,169 @@ class PlaybackController(
         _playbackError.value = null
     }
 
+    // ---- Sleep Timer ----
+
+    fun setSleepTimerMinutes(minutes: Int) {
+        if (minutes <= 0) {
+            cancelSleepTimer()
+            return
+        }
+        sleepTimerJob?.cancel()
+        val durationMs = minutes.toLong() * 60_000L
+        val endAtElapsedMs = SystemClock.elapsedRealtime() + durationMs
+        _sleepTimerRemainingMs.value = durationMs
+        sleepTimerJob = coroutineScope.launch(Dispatchers.Main) {
+            while (isActive) {
+                val remaining = endAtElapsedMs - SystemClock.elapsedRealtime()
+                if (remaining <= 0L) {
+                    _sleepTimerRemainingMs.value = null
+                    sleepTimerJob = null
+                    setPlaying(false)
+                    break
+                }
+                _sleepTimerRemainingMs.value = remaining
+                delay(minOf(1000L, remaining))
+            }
+        }
+    }
+
+    fun setSleepTimerEndOfTrack() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimerRemainingMs.value = SLEEP_TIMER_END_OF_TRACK
+    }
+
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimerRemainingMs.value = null
+    }
+
+    // ---- Taste Affinity & Autoplay Queue Management (Windows Auricle Parity) ----
+
+    private fun pushSessionHistory(song: SongItem?) {
+        if (song == null || song.videoId.isBlank()) return
+        if (sessionHistory.lastOrNull()?.videoId == song.videoId) return
+        sessionHistory.addLast(song)
+        while (sessionHistory.size > SESSION_HISTORY_MAX) {
+            sessionHistory.removeFirst()
+        }
+    }
+
+    private fun normalizeArtistKey(name: String): String =
+        name.trim().lowercase(Locale.US).replace(Regex("\\s+"), " ")
+
+    private fun extractArtistKeys(artistText: String, credits: List<ArtistCredit> = emptyList()): List<String> {
+        val keys = LinkedHashSet<String>()
+        for (credit in credits) {
+            val normalized = normalizeArtistKey(credit.name)
+            if (normalized.isNotEmpty()) keys.add(normalized)
+        }
+        if (artistText.isNotBlank()) {
+            val full = normalizeArtistKey(artistText)
+            if (full.isNotEmpty()) keys.add(full)
+            for (credit in splitArtistCredits(artistText)) {
+                val normalized = normalizeArtistKey(credit.name)
+                if (normalized.isNotEmpty()) keys.add(normalized)
+            }
+        }
+        return keys.toList()
+    }
+
+    private fun buildArtistAffinityMap(): Map<String, Float> {
+        val lib = libraryRepo.state.value
+        val affinity = HashMap<String, Float>()
+        fun record(key: String, weight: Float) {
+            if (key.isEmpty()) return
+            val existing = affinity[key]
+            if (existing == null || weight > existing) {
+                affinity[key] = weight
+            }
+        }
+        for (album in lib.savedAlbums) {
+            for (k in extractArtistKeys(album.artist, album.artists)) {
+                record(k, 0.6f)
+            }
+        }
+        for (song in lib.likedSongs) {
+            for (k in extractArtistKeys(song.artist, song.artists)) {
+                record(k, 0.8f)
+            }
+        }
+        for (artist in lib.followedArtists) {
+            record(normalizeArtistKey(artist.name), 1.0f)
+        }
+        return affinity
+    }
+
+    private fun applyTasteAffinityBias(tracks: List<SongItem>): List<SongItem> {
+        if (tracks.size <= 1) return tracks
+        val affinity = buildArtistAffinityMap()
+        if (affinity.isEmpty()) return tracks
+
+        return tracks.withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<SongItem>> { (idx, song) ->
+                    val score = extractArtistKeys(song.artist, song.artists)
+                        .maxOfOrNull { affinity[it] ?: 0f } ?: 0f
+                    idx.toFloat() - TASTE_AFFINITY_BIAS * score
+                }.thenBy { it.index }
+            )
+            .map { it.value }
+    }
+
+    private fun filterAndRankAutoplayBatch(
+        rawTracks: List<SongItem>,
+        currentVideoId: String?,
+        queueIds: Set<String>,
+        existingAutoplayIds: Set<String>
+    ): List<SongItem> {
+        val distinct = rawTracks
+            .filter { it.videoId.isNotBlank() }
+            .distinctBy { it.videoId }
+        if (distinct.isEmpty()) return emptyList()
+
+        val recentIds = libraryRepo.state.value.recentlyPlayed
+            .take(RECENTLY_PLAYED_DEDUP_LIMIT)
+            .map { it.track.videoId }
+            .toSet()
+
+        val strictExcluded = HashSet<String>(queueIds.size + existingAutoplayIds.size + recentIds.size + 1)
+        if (!currentVideoId.isNullOrBlank()) strictExcluded.add(currentVideoId)
+        strictExcluded.addAll(queueIds)
+        strictExcluded.addAll(existingAutoplayIds)
+        strictExcluded.addAll(recentIds)
+
+        var filtered = distinct.filterNot { strictExcluded.contains(it.videoId) }
+
+        if (filtered.isEmpty()) {
+            val softExcluded = HashSet<String>(queueIds.size + existingAutoplayIds.size + 1)
+            if (!currentVideoId.isNullOrBlank()) softExcluded.add(currentVideoId)
+            softExcluded.addAll(queueIds)
+            softExcluded.addAll(existingAutoplayIds)
+            filtered = distinct.filterNot { softExcluded.contains(it.videoId) }
+        }
+
+        if (filtered.isEmpty()) {
+            filtered = distinct.filterNot {
+                it.videoId == currentVideoId || existingAutoplayIds.contains(it.videoId)
+            }
+        }
+
+        return applyTasteAffinityBias(filtered)
+    }
+
+    private fun clearAutoplayState() {
+        autoplayGeneration++
+        autoplayFetchJob?.cancel()
+        autoplayRefillJob?.cancel()
+        autoplayAdvanceJob?.cancel()
+        isRefillingAutoplay = false
+        _isLoadingAutoplay.value = false
+        _autoplayQueue.value = emptyList()
+        autoplaySeed = ""
+    }
+
     private fun observeAutoplaySetting() {
         val repo = settingsRepo ?: return
         coroutineScope.launch {
@@ -131,46 +324,181 @@ class PlaybackController(
                 .map { it.autoplay }
                 .distinctUntilChanged()
                 .collect { autoplayEnabled ->
-                    if (!autoplayEnabled) {
-                        autoplayFetchJob?.cancel()
-                        autoplayAdvanceJob?.cancel()
-                        _autoplayCandidates.value = emptyList()
-                    } else {
-                        val current = _currentTrack.value
-                        if (current != null && _autoplayCandidates.value.isEmpty()) {
-                            fetchAutoplayCandidates(current.videoId)
+                    withContext(Dispatchers.Main) {
+                        if (!autoplayEnabled) {
+                            clearAutoplayState()
+                        } else {
+                            val current = _currentTrack.value
+                            if (current != null && _autoplayQueue.value.isEmpty() && autoplayFetchJob?.isActive != true) {
+                                resetAndFetchAutoplay(current.videoId)
+                            }
                         }
                     }
                 }
         }
     }
 
-    private fun fetchAutoplayCandidates(videoId: String) {
-        if (videoId.isBlank()) return
-        if (settingsRepo?.settings?.value?.autoplay == false) {
-            _autoplayCandidates.value = emptyList()
+    private fun resetAndFetchAutoplay(seedVideoId: String, forceIgnoreSetting: Boolean = false) {
+        autoplayGeneration++
+        val gen = autoplayGeneration
+        autoplaySeed = seedVideoId
+        autoplayFetchJob?.cancel()
+        autoplayRefillJob?.cancel()
+        isRefillingAutoplay = false
+        _autoplayQueue.value = emptyList()
+
+        if (seedVideoId.isBlank() || (!forceIgnoreSetting && settingsRepo?.settings?.value?.autoplay == false)) {
+            _isLoadingAutoplay.value = false
             return
         }
-        autoplayFetchJob?.cancel()
+
+        _isLoadingAutoplay.value = true
         autoplayFetchJob = coroutineScope.launch(Dispatchers.IO) {
             try {
-                val related = musicRepo.getWatchPlaylist(videoId)
+                val related = musicRepo.getWatchPlaylist(seedVideoId)
                 withContext(Dispatchers.Main) {
-                    if (_currentTrack.value?.videoId != videoId) return@withContext
-                    if (settingsRepo?.settings?.value?.autoplay == false) {
-                        _autoplayCandidates.value = emptyList()
+                    if (autoplayGeneration != gen) return@withContext
+                    if (!forceIgnoreSetting && settingsRepo?.settings?.value?.autoplay == false) {
+                        _autoplayQueue.value = emptyList()
+                        _isLoadingAutoplay.value = false
                         return@withContext
                     }
-                    val existingIds = _queue.value.map { it.videoId }.toSet()
-                    _autoplayCandidates.value = related.filterNot { existingIds.contains(it.videoId) }
+                    val queueIds = _queue.value.map { it.videoId }.toSet()
+                    val ranked = filterAndRankAutoplayBatch(
+                        rawTracks = related,
+                        currentVideoId = _currentTrack.value?.videoId,
+                        queueIds = queueIds,
+                        existingAutoplayIds = emptySet()
+                    ).take(AUTOPLAY_TARGET)
+                    _autoplayQueue.value = ranked
+                    _isLoadingAutoplay.value = false
                 }
             } catch (e: CancellationException) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (autoplayGeneration == gen) {
+                        _isLoadingAutoplay.value = false
+                    }
+                }
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Autoplay fetch error: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    if (autoplayGeneration == gen) {
+                        _isLoadingAutoplay.value = false
+                    }
+                }
             }
         }
     }
+
+    private fun ensureAutoplayPopulatedIfEmpty(seedVideoId: String) {
+        if (seedVideoId.isBlank()) return
+        if (settingsRepo?.settings?.value?.autoplay == false) return
+        if (_autoplayQueue.value.isNotEmpty()) return
+        if (autoplayFetchJob?.isActive == true || isRefillingAutoplay) return
+        resetAndFetchAutoplay(seedVideoId)
+    }
+
+    private fun refillAutoplayQueue() {
+        if (isRefillingAutoplay) return
+        if (settingsRepo?.settings?.value?.autoplay == false) return
+        val currentAutoplay = _autoplayQueue.value
+        if (currentAutoplay.size >= AUTOPLAY_MAX) return
+
+        val seed = currentAutoplay.lastOrNull()?.videoId?.takeIf { it.isNotBlank() }
+            ?: _currentTrack.value?.videoId?.takeIf { it.isNotBlank() }
+            ?: autoplaySeed
+        if (seed.isBlank()) return
+
+        val gen = autoplayGeneration
+        isRefillingAutoplay = true
+        _isLoadingAutoplay.value = true
+        autoplayRefillJob?.cancel()
+        autoplayRefillJob = coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val related = musicRepo.getWatchPlaylist(seed)
+                withContext(Dispatchers.Main) {
+                    if (autoplayGeneration != gen) return@withContext
+                    isRefillingAutoplay = false
+                    _isLoadingAutoplay.value = false
+                    if (settingsRepo?.settings?.value?.autoplay == false) return@withContext
+
+                    val latestAutoplay = _autoplayQueue.value
+                    val room = (AUTOPLAY_MAX - latestAutoplay.size).coerceAtLeast(0)
+                    if (room == 0) return@withContext
+
+                    val queueIds = _queue.value.map { it.videoId }.toSet()
+                    val existingAutoplayIds = latestAutoplay.map { it.videoId }.toSet()
+                    val additions = filterAndRankAutoplayBatch(
+                        rawTracks = related,
+                        currentVideoId = _currentTrack.value?.videoId,
+                        queueIds = queueIds,
+                        existingAutoplayIds = existingAutoplayIds
+                    ).take(room)
+
+                    if (additions.isNotEmpty()) {
+                        _autoplayQueue.value = latestAutoplay + additions
+                    }
+                }
+            } catch (e: CancellationException) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (autoplayGeneration == gen) {
+                        isRefillingAutoplay = false
+                        _isLoadingAutoplay.value = false
+                    }
+                }
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Autoplay refill error: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    if (autoplayGeneration == gen) {
+                        isRefillingAutoplay = false
+                        _isLoadingAutoplay.value = false
+                    }
+                }
+            }
+        }
+    }
+
+    private fun removeVideoFromAutoplay(videoId: String) {
+        if (videoId.isBlank()) return
+        val current = _autoplayQueue.value
+        if (current.any { it.videoId == videoId }) {
+            val updated = current.filterNot { it.videoId == videoId }
+            _autoplayQueue.value = updated
+            if (updated.size < AUTOPLAY_REFILL_THRESHOLD) {
+                refillAutoplayQueue()
+            }
+        }
+    }
+
+    fun removeFromAutoplay(index: Int) {
+        val current = _autoplayQueue.value
+        if (index !in current.indices) return
+        val updated = current.toMutableList().apply { removeAt(index) }
+        _autoplayQueue.value = updated
+        if (updated.size < AUTOPLAY_REFILL_THRESHOLD) {
+            refillAutoplayQueue()
+        }
+    }
+
+    fun startRadio(song: SongItem) {
+        consecutiveErrorCount = 0
+        settingsRepo?.let { repo ->
+            if (!repo.settings.value.autoplay) {
+                repo.updateAutoplay(true)
+            }
+        }
+        playTrackInternal(
+            song = song,
+            newQueue = listOf(song),
+            sourceLabel = "Radio · ${song.title}",
+            resetShuffle = true,
+            forceAutoplayFetch = true
+        )
+    }
+
+    // ---- MediaSessionService & ExoPlayer ----
 
     fun ensureMediaServiceConnected() {
         coroutineScope.launch(Dispatchers.Main) {
@@ -319,7 +647,7 @@ class PlaybackController(
                         }
                     }
                 }
-                delay(250)
+                delay(if (_isPlaying.value) 120L else 300L)
             }
         }
     }
@@ -400,8 +728,8 @@ class PlaybackController(
             val remoteTrack = state.currentTrack
             if (state.queue.isEmpty() && remoteTrack == null) {
                 streamResolveJob?.cancel()
-                autoplayFetchJob?.cancel()
-                autoplayAdvanceJob?.cancel()
+                clearAutoplayState()
+                sessionHistory.clear()
                 pendingPlayback = null
                 exoPlayer?.apply {
                     stop()
@@ -414,7 +742,6 @@ class PlaybackController(
                 _isLoading.value = false
                 _currentPosition.value = 0L
                 _duration.value = 0L
-                _autoplayCandidates.value = emptyList()
                 _isShuffle.value = false
                 unshuffledQueue = emptyList()
                 _repeatMode.value = state.repeatMode
@@ -434,7 +761,12 @@ class PlaybackController(
             val effectivePos = targetPos ?: state.positionMs
             if (remoteTrack != null) {
                 if (_currentTrack.value?.videoId != remoteTrack.videoId) {
-                    playSongInternal(remoteTrack, effectivePos, autoPlay = state.isPlaying)
+                    playSongInternal(
+                        song = remoteTrack,
+                        startPositionMs = effectivePos,
+                        autoPlay = state.isPlaying,
+                        resetAutoplay = false
+                    )
                 } else {
                     val player = exoPlayer
                     if (player != null) {
@@ -525,9 +857,11 @@ class PlaybackController(
         song: SongItem,
         newQueue: List<SongItem>,
         sourceLabel: String?,
-        resetShuffle: Boolean
+        resetShuffle: Boolean,
+        forceAutoplayFetch: Boolean = false
     ) {
         autoplayAdvanceJob?.cancel()
+        sessionHistory.clear()
         if (resetShuffle) {
             _isShuffle.value = false
             unshuffledQueue = emptyList()
@@ -543,7 +877,13 @@ class PlaybackController(
         val idx = targetQueue.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0)
         _currentIndex.value = idx
 
-        playSongInternal(song, startPositionMs = 0L, autoPlay = true)
+        playSongInternal(
+            song = song,
+            startPositionMs = 0L,
+            autoPlay = true,
+            resetAutoplay = true,
+            forceAutoplayFetch = forceAutoplayFetch
+        )
 
         if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
             if (targetQueue.size > 1) {
@@ -604,7 +944,9 @@ class PlaybackController(
         song: SongItem,
         startPositionMs: Long = 0L,
         autoPlay: Boolean = true,
-        clearError: Boolean = true
+        clearError: Boolean = true,
+        resetAutoplay: Boolean = false,
+        forceAutoplayFetch: Boolean = false
     ) {
         autoplayAdvanceJob?.cancel()
         if (clearError) {
@@ -622,10 +964,8 @@ class PlaybackController(
         retriedErrorVideoId = null
         libraryRepo.recordRecentlyPlayed(song)
 
-        autoplayFetchJob?.cancel()
-        _autoplayCandidates.value = emptyList()
-        if (settingsRepo?.settings?.value?.autoplay ?: true) {
-            fetchAutoplayCandidates(song.videoId)
+        if (resetAutoplay) {
+            resetAndFetchAutoplay(song.videoId, forceIgnoreSetting = forceAutoplayFetch)
         }
 
         val highQuality = settingsRepo?.settings?.value?.highQualityAudio ?: true
@@ -658,7 +998,7 @@ class PlaybackController(
         val isPartyGuest = _partySnapshot.value.isActive && !_partySnapshot.value.isHost
         val q = _queue.value
         val hasNextInQueue = _currentIndex.value + 1 < q.size || (_repeatMode.value == "all" && q.size > 1)
-        val hasAutoplayNext = (settingsRepo?.settings?.value?.autoplay ?: true) && _autoplayCandidates.value.isNotEmpty()
+        val hasAutoplayNext = (settingsRepo?.settings?.value?.autoplay ?: true) && _autoplayQueue.value.isNotEmpty()
 
         if (consecutiveErrorCount < 3 && !isPartyGuest && (hasNextInQueue || hasAutoplayNext)) {
             skipNextInternal(clearError = false)
@@ -722,7 +1062,12 @@ class PlaybackController(
             if (targetPlaying) {
                 val current = _currentTrack.value
                 if (current != null) {
-                    playSongInternal(current, startPositionMs = _currentPosition.value, autoPlay = true)
+                    playSongInternal(
+                        song = current,
+                        startPositionMs = _currentPosition.value,
+                        autoPlay = true,
+                        resetAutoplay = false
+                    )
                 }
             } else {
                 _isPlaying.value = false
@@ -740,7 +1085,12 @@ class PlaybackController(
                 Player.STATE_IDLE -> {
                     val current = _currentTrack.value
                     if (current != null) {
-                        playSongInternal(current, startPositionMs = _currentPosition.value, autoPlay = true)
+                        playSongInternal(
+                            song = current,
+                            startPositionMs = _currentPosition.value,
+                            autoPlay = true,
+                            resetAutoplay = false
+                        )
                         return
                     }
                 }
@@ -796,8 +1146,10 @@ class PlaybackController(
         if (q.isEmpty()) return false
         if (_currentIndex.value + 1 < q.size) return true
         if (_repeatMode.value == "all") return true
+        val isPartyGuest = _partySnapshot.value.isActive && !_partySnapshot.value.isHost
+        if (isPartyGuest) return false
         val autoplayAllowed = settingsRepo?.settings?.value?.autoplay ?: true
-        return autoplayAllowed && (_autoplayCandidates.value.isNotEmpty() || _currentTrack.value != null)
+        return autoplayAllowed && (_autoplayQueue.value.isNotEmpty() || _currentTrack.value != null)
     }
 
     fun skipNext() {
@@ -816,14 +1168,29 @@ class PlaybackController(
         if (nextIdx < q.size) {
             _currentIndex.value = nextIdx
             val nextSong = q[nextIdx]
-            playSongInternal(nextSong, startPositionMs = 0L, autoPlay = true, clearError = clearError)
+            playSongInternal(
+                song = nextSong,
+                startPositionMs = 0L,
+                autoPlay = true,
+                clearError = clearError,
+                resetAutoplay = false
+            )
+            ensureAutoplayPopulatedIfEmpty(nextSong.videoId)
 
             if (isPartyActive && !isApplyingRemoteParty) {
                 sendPartyAction(PartyAction(type = "next"))
             }
         } else if (_repeatMode.value == "all" && q.isNotEmpty()) {
             _currentIndex.value = 0
-            playSongInternal(q[0], startPositionMs = 0L, autoPlay = true, clearError = clearError)
+            val firstSong = q[0]
+            playSongInternal(
+                song = firstSong,
+                startPositionMs = 0L,
+                autoPlay = true,
+                clearError = clearError,
+                resetAutoplay = false
+            )
+            ensureAutoplayPopulatedIfEmpty(firstSong.videoId)
 
             if (isPartyActive && !isApplyingRemoteParty) {
                 sendPartyAction(PartyAction(type = "next"))
@@ -832,7 +1199,11 @@ class PlaybackController(
             val current = _currentTrack.value
             val autoplayAllowed = settingsRepo?.settings?.value?.autoplay ?: true
             if (current != null && (!isPartyActive || isHost) && autoplayAllowed) {
-                advanceIntoAutoplay(current, clearError = clearError)
+                if (_autoplayQueue.value.isNotEmpty()) {
+                    playAutoplayAtPreservingQueues(0, clearError = clearError)
+                } else {
+                    advanceIntoAutoplay(current, clearError = clearError)
+                }
             } else {
                 val player = exoPlayer
                 val isActivelyPlaying = player != null &&
@@ -852,21 +1223,61 @@ class PlaybackController(
         }
 
         val q = _queue.value
-        if (q.isEmpty()) return
+        if (q.isEmpty() && sessionHistory.isEmpty()) return
 
         val currentIdx = _currentIndex.value
-        if (currentIdx > 0) {
+        if (currentIdx > 0 && q.isNotEmpty()) {
             val prevIdx = currentIdx - 1
             _currentIndex.value = prevIdx
-            playSongInternal(q[prevIdx], startPositionMs = 0L, autoPlay = true)
+            playSongInternal(
+                song = q[prevIdx],
+                startPositionMs = 0L,
+                autoPlay = true,
+                resetAutoplay = false
+            )
 
             if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
                 sendPartyAction(PartyAction(type = "prev"))
             }
+        } else if (sessionHistory.isNotEmpty()) {
+            val prevSong = sessionHistory.removeLast()
+            val updatedQ = q.toMutableList()
+            val targetIdx: Int
+            if (updatedQ.isEmpty()) {
+                updatedQ.add(prevSong)
+                targetIdx = 0
+            } else {
+                val curIdx = currentIdx.coerceIn(0, updatedQ.lastIndex)
+                updatedQ[curIdx] = prevSong
+                targetIdx = curIdx
+            }
+            _queue.value = updatedQ
+            _currentIndex.value = targetIdx
+            playSongInternal(
+                song = prevSong,
+                startPositionMs = 0L,
+                autoPlay = true,
+                resetAutoplay = false
+            )
+            if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
+                sendPartyAction(
+                    PartyAction(
+                        type = "replace_queue",
+                        tracks = updatedQ,
+                        startIndex = targetIdx,
+                        isPlaying = true
+                    )
+                )
+            }
         } else if (_repeatMode.value == "all" && q.isNotEmpty()) {
             val lastIdx = q.lastIndex
             _currentIndex.value = lastIdx
-            playSongInternal(q[lastIdx], startPositionMs = 0L, autoPlay = true)
+            playSongInternal(
+                song = q[lastIdx],
+                startPositionMs = 0L,
+                autoPlay = true,
+                resetAutoplay = false
+            )
 
             if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
                 sendPartyAction(PartyAction(type = "play_queue_index", index = lastIdx))
@@ -883,7 +1294,13 @@ class PlaybackController(
         consecutiveErrorCount = 0
         _currentIndex.value = index
         val song = q[index]
-        playSongInternal(song, startPositionMs = 0L, autoPlay = true)
+        playSongInternal(
+            song = song,
+            startPositionMs = 0L,
+            autoPlay = true,
+            resetAutoplay = false
+        )
+        ensureAutoplayPopulatedIfEmpty(song.videoId)
 
         if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
             sendPartyAction(
@@ -900,6 +1317,7 @@ class PlaybackController(
             playTrack(song, listOf(song), "Queue")
             return
         }
+        removeVideoFromAutoplay(song.videoId)
         val currentQ = _queue.value
         val alreadyInQueue = currentQ.any { it.videoId == song.videoId }
         val updated = currentQ + song
@@ -928,6 +1346,7 @@ class PlaybackController(
             playTrack(song, listOf(song), "Queue")
             return
         }
+        removeVideoFromAutoplay(song.videoId)
         val currentQ = _queue.value.toMutableList()
         val currentIdx = _currentIndex.value.coerceIn(0, currentQ.lastIndex)
         val existingUpcomingIndex = (currentIdx + 1 until currentQ.size)
@@ -986,7 +1405,8 @@ class PlaybackController(
 
         if (currentQ.isEmpty()) {
             streamResolveJob?.cancel()
-            autoplayFetchJob?.cancel()
+            clearAutoplayState()
+            sessionHistory.clear()
             pendingPlayback = null
             exoPlayer?.stop()
             exoPlayer?.clearMediaItems()
@@ -997,7 +1417,6 @@ class PlaybackController(
             _isLoading.value = false
             _currentPosition.value = 0L
             _duration.value = 0L
-            _autoplayCandidates.value = emptyList()
             _playbackError.value = null
             unshuffledQueue = emptyList()
             syncPartyQueuePreservingPosition()
@@ -1016,7 +1435,12 @@ class PlaybackController(
             index == currentIdx -> {
                 val nextIdx = index.coerceIn(0, currentQ.lastIndex)
                 _currentIndex.value = nextIdx
-                playSongInternal(currentQ[nextIdx], startPositionMs = 0L, autoPlay = true)
+                playSongInternal(
+                    song = currentQ[nextIdx],
+                    startPositionMs = 0L,
+                    autoPlay = true,
+                    resetAutoplay = false
+                )
                 if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
                     sendPartyActionsSequential(
                         PartyAction(
@@ -1046,53 +1470,110 @@ class PlaybackController(
         }
     }
 
-    fun playAutoplayCandidate(candidate: SongItem) {
+    fun playAutoplayAtPreservingQueues(index: Int, clearError: Boolean = true) {
+        val autoplayList = _autoplayQueue.value
+        if (index !in autoplayList.indices) return
         autoplayAdvanceJob?.cancel()
-        val currentQ = _queue.value
-        val existingIds = currentQ.map { it.videoId }.toSet()
-        val remainingUnseen = _autoplayCandidates.value
-            .filterNot { it.videoId == candidate.videoId || existingIds.contains(it.videoId) }
 
-        val existingIndex = currentQ.indexOfFirst { it.videoId == candidate.videoId }
-        val updatedQ: List<SongItem>
-        val targetIndex: Int
-        val appendedTracks: List<SongItem>
+        val song = autoplayList[index]
+        val remainingAutoplay = autoplayList.toMutableList().apply { removeAt(index) }
+        _autoplayQueue.value = remainingAutoplay
 
-        if (existingIndex >= 0) {
-            updatedQ = currentQ + remainingUnseen
-            targetIndex = existingIndex
-            appendedTracks = remainingUnseen
+        val previousTrack = _currentTrack.value
+        pushSessionHistory(previousTrack)
+        autoplaySeed = song.videoId
+
+        val currentQ = _queue.value.toMutableList()
+        val targetIdx: Int
+        if (currentQ.isEmpty()) {
+            currentQ.add(song)
+            targetIdx = 0
         } else {
-            val toAppend = buildList {
-                if (!existingIds.contains(candidate.videoId)) {
-                    add(candidate)
-                }
-                addAll(remainingUnseen)
+            val curIdx = _currentIndex.value.coerceIn(0, currentQ.lastIndex)
+            currentQ[curIdx] = song
+            targetIdx = curIdx
+        }
+        _queue.value = currentQ
+        _currentIndex.value = targetIdx
+
+        if (_isShuffle.value && previousTrack != null) {
+            val unshuf = unshuffledQueue.toMutableList()
+            val match = unshuf.indexOfFirst { it.videoId == previousTrack.videoId }
+            if (match >= 0) {
+                unshuf[match] = song
+                unshuffledQueue = unshuf
             }
-            if (toAppend.isEmpty()) {
-                return
-            }
-            updatedQ = currentQ + toAppend
-            targetIndex = currentQ.size
-            appendedTracks = toAppend
         }
 
-        if (_isShuffle.value && appendedTracks.isNotEmpty()) {
-            unshuffledQueue = unshuffledQueue + appendedTracks
-        }
+        playSongInternal(
+            song = song,
+            startPositionMs = 0L,
+            autoPlay = true,
+            clearError = clearError,
+            resetAutoplay = false
+        )
 
-        consecutiveErrorCount = 0
-        _queue.value = updatedQ
-        _currentIndex.value = targetIndex
-        val trackToPlay = updatedQ[targetIndex]
-        playSongInternal(trackToPlay, startPositionMs = 0L, autoPlay = true)
+        if (remainingAutoplay.size < AUTOPLAY_REFILL_THRESHOLD) {
+            refillAutoplayQueue()
+        }
 
         if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
             sendPartyAction(
                 PartyAction(
                     type = "replace_queue",
-                    tracks = updatedQ,
-                    startIndex = targetIndex,
+                    tracks = currentQ,
+                    startIndex = targetIdx,
+                    isPlaying = true
+                )
+            )
+        }
+    }
+
+    fun playAutoplayCandidate(candidate: SongItem) {
+        consecutiveErrorCount = 0
+        val idx = _autoplayQueue.value.indexOfFirst { it.videoId == candidate.videoId }
+        if (idx >= 0) {
+            playAutoplayAtPreservingQueues(idx, clearError = true)
+            return
+        }
+
+        // Fallback if candidate is not currently in _autoplayQueue: still preserve user queue & autoplay
+        autoplayAdvanceJob?.cancel()
+        val previousTrack = _currentTrack.value
+        pushSessionHistory(previousTrack)
+        autoplaySeed = candidate.videoId
+
+        val currentQ = _queue.value.toMutableList()
+        val targetIdx: Int
+        if (currentQ.isEmpty()) {
+            currentQ.add(candidate)
+            targetIdx = 0
+        } else {
+            val curIdx = _currentIndex.value.coerceIn(0, currentQ.lastIndex)
+            currentQ[curIdx] = candidate
+            targetIdx = curIdx
+        }
+        _queue.value = currentQ
+        _currentIndex.value = targetIdx
+
+        playSongInternal(
+            song = candidate,
+            startPositionMs = 0L,
+            autoPlay = true,
+            clearError = true,
+            resetAutoplay = false
+        )
+
+        if (_autoplayQueue.value.size < AUTOPLAY_REFILL_THRESHOLD) {
+            refillAutoplayQueue()
+        }
+
+        if (_partySnapshot.value.isActive && !isApplyingRemoteParty) {
+            sendPartyAction(
+                PartyAction(
+                    type = "replace_queue",
+                    tracks = currentQ,
+                    startIndex = targetIdx,
                     isPlaying = true
                 )
             )
@@ -1159,6 +1640,24 @@ class PlaybackController(
         val isPartyActive = _partySnapshot.value.isActive
         val isHost = _partySnapshot.value.isHost
 
+        // Sleep Timer: "End of current track" pauses cleanly and clears timer
+        if (_sleepTimerRemainingMs.value == SLEEP_TIMER_END_OF_TRACK) {
+            cancelSleepTimer()
+            exoPlayer?.pause()
+            _isPlaying.value = false
+            _isLoading.value = false
+            if (isPartyActive && isHost && !isApplyingRemoteParty) {
+                sendPartyAction(
+                    PartyAction(
+                        type = "play_pause",
+                        isPlaying = false,
+                        positionMs = _duration.value.coerceAtLeast(0L)
+                    )
+                )
+            }
+            return
+        }
+
         // In a Party, only the Host drives natural track-end transitions to prevent split-brain
         if (isPartyActive && !isHost) {
             return
@@ -1171,7 +1670,12 @@ class PlaybackController(
                 player.play()
                 _currentPosition.value = 0L
             } else {
-                playSongInternal(current, startPositionMs = 0L, autoPlay = true)
+                playSongInternal(
+                    song = current,
+                    startPositionMs = 0L,
+                    autoPlay = true,
+                    resetAutoplay = false
+                )
             }
             if (isPartyActive && isHost) {
                 sendPartyAction(PartyAction(type = "seek", positionMs = 0L))
@@ -1185,20 +1689,37 @@ class PlaybackController(
         if (nextIdx < q.size) {
             _currentIndex.value = nextIdx
             val nextSong = q[nextIdx]
-            playSongInternal(nextSong, startPositionMs = 0L, autoPlay = true)
+            playSongInternal(
+                song = nextSong,
+                startPositionMs = 0L,
+                autoPlay = true,
+                resetAutoplay = false
+            )
+            ensureAutoplayPopulatedIfEmpty(nextSong.videoId)
             if (isPartyActive && isHost) {
                 sendPartyAction(PartyAction(type = "next"))
             }
         } else if (_repeatMode.value == "all" && q.isNotEmpty()) {
             _currentIndex.value = 0
-            playSongInternal(q[0], startPositionMs = 0L, autoPlay = true)
+            val firstSong = q[0]
+            playSongInternal(
+                song = firstSong,
+                startPositionMs = 0L,
+                autoPlay = true,
+                resetAutoplay = false
+            )
+            ensureAutoplayPopulatedIfEmpty(firstSong.videoId)
             if (isPartyActive && isHost) {
                 sendPartyAction(PartyAction(type = "next"))
             }
         } else {
             val autoplayAllowed = settingsRepo?.settings?.value?.autoplay ?: true
             if (autoplayAllowed) {
-                advanceIntoAutoplay(current, clearError = true)
+                if (_autoplayQueue.value.isNotEmpty()) {
+                    playAutoplayAtPreservingQueues(0, clearError = true)
+                } else {
+                    advanceIntoAutoplay(current, clearError = true)
+                }
             } else {
                 _isPlaying.value = false
                 _isLoading.value = false
@@ -1209,25 +1730,37 @@ class PlaybackController(
     private fun advanceIntoAutoplay(current: SongItem, clearError: Boolean) {
         val isPartyActive = _partySnapshot.value.isActive
         val isHost = _partySnapshot.value.isHost
+        if (isPartyActive && !isHost) return
 
+        if (_autoplayQueue.value.isNotEmpty()) {
+            playAutoplayAtPreservingQueues(0, clearError = clearError)
+            return
+        }
+
+        val gen = autoplayGeneration
         autoplayAdvanceJob?.cancel()
+        _isLoadingAutoplay.value = true
         autoplayAdvanceJob = coroutineScope.launch {
-            val cachedCandidates = _autoplayCandidates.value
-            val fetchedTracks = if (cachedCandidates.isNotEmpty()) {
-                cachedCandidates
-            } else {
-                try {
-                    withContext(Dispatchers.IO) { musicRepo.getWatchPlaylist(current.videoId) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    emptyList()
+            val fetchedTracks = try {
+                withContext(Dispatchers.IO) { musicRepo.getWatchPlaylist(current.videoId) }
+            } catch (e: CancellationException) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (autoplayGeneration == gen) {
+                        _isLoadingAutoplay.value = false
+                    }
                 }
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Autoplay advance fetch error: ${e.message}")
+                emptyList()
             }
 
             withContext(Dispatchers.Main) {
+                if (autoplayGeneration != gen) return@withContext
+                _isLoadingAutoplay.value = false
                 if (_currentTrack.value?.videoId != current.videoId) return@withContext
                 if (settingsRepo?.settings?.value?.autoplay == false) return@withContext
+                if (_partySnapshot.value.isActive && !_partySnapshot.value.isHost) return@withContext
 
                 val latestQueue = _queue.value
                 val latestIdx = _currentIndex.value
@@ -1236,39 +1769,31 @@ class PlaybackController(
                 if (latestIdx + 1 < latestQueue.size) {
                     val nextIdx = latestIdx + 1
                     _currentIndex.value = nextIdx
-                    playSongInternal(latestQueue[nextIdx], startPositionMs = 0L, autoPlay = true, clearError = clearError)
-                    if (isPartyActive && isHost) {
+                    playSongInternal(
+                        song = latestQueue[nextIdx],
+                        startPositionMs = 0L,
+                        autoPlay = true,
+                        clearError = clearError,
+                        resetAutoplay = false
+                    )
+                    if (_partySnapshot.value.isActive && _partySnapshot.value.isHost) {
                         sendPartyAction(PartyAction(type = "next"))
                     }
                     return@withContext
                 }
 
-                val existingIds = latestQueue.map { it.videoId }.toSet()
-                val freshTracks = fetchedTracks
-                    .filterNot { existingIds.contains(it.videoId) }
-                    .distinctBy { it.videoId }
+                val queueIds = latestQueue.map { it.videoId }.toSet()
+                val existingAutoplayIds = _autoplayQueue.value.map { it.videoId }.toSet()
+                val ranked = filterAndRankAutoplayBatch(
+                    rawTracks = fetchedTracks,
+                    currentVideoId = current.videoId,
+                    queueIds = queueIds,
+                    existingAutoplayIds = existingAutoplayIds
+                ).take(AUTOPLAY_TARGET)
 
-                if (freshTracks.isNotEmpty()) {
-                    val targetIdx = latestQueue.size
-                    val updatedQ = latestQueue + freshTracks
-                    _queue.value = updatedQ
-                    if (_isShuffle.value) {
-                        unshuffledQueue = unshuffledQueue + freshTracks
-                    }
-                    _currentIndex.value = targetIdx
-                    val nextSong = updatedQ[targetIdx]
-                    playSongInternal(nextSong, startPositionMs = 0L, autoPlay = true, clearError = clearError)
-
-                    if (isPartyActive && isHost) {
-                        sendPartyAction(
-                            PartyAction(
-                                type = "replace_queue",
-                                tracks = updatedQ,
-                                startIndex = targetIdx,
-                                isPlaying = true
-                            )
-                        )
-                    }
+                if (ranked.isNotEmpty()) {
+                    _autoplayQueue.value = _autoplayQueue.value + ranked
+                    playAutoplayAtPreservingQueues(0, clearError = clearError)
                 } else {
                     _isPlaying.value = false
                     _isLoading.value = false
@@ -1307,6 +1832,7 @@ class PlaybackController(
             withContext(Dispatchers.Main) {
                 _isShuffle.value = false
                 unshuffledQueue = emptyList()
+                clearAutoplayState()
             }
             Result.success(snapshot)
         } catch (e: Exception) {
