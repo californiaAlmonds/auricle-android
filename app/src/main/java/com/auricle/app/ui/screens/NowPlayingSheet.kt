@@ -242,6 +242,7 @@ fun NowPlayingSheet(
     val density = LocalDensity.current
     val dismissThresholdPx = with(density) { 110.dp.toPx() }
     val queueRowHeightPx = with(density) { 56.dp.toPx() }
+    val queueListState = rememberLazyListState()
 
     var backProgress by remember { mutableFloatStateOf(0f) }
     var isDismissDragging by remember { mutableStateOf(false) }
@@ -1042,30 +1043,29 @@ fun NowPlayingSheet(
                                 // Up Next Panel
                                 val autoplay = appSettings?.autoplay ?: true
                                 val upcoming = queue.drop(currentIndex + 1)
-                                val stableKeys = remember(upcoming) {
+                                val keyedUpcoming = remember(upcoming) {
                                     val counts = HashMap<String, Int>(upcoming.size)
                                     upcoming.map { item ->
                                         val count = (counts[item.videoId] ?: 0) + 1
                                         counts[item.videoId] = count
-                                        "upcoming_${item.videoId}_$count"
+                                        "upcoming_${item.videoId}_$count" to item
                                     }
                                 }
-                                val autoplayKeys = remember(autoplayCandidates) {
+                                val keyedAutoplay = remember(autoplayCandidates) {
                                     val counts = HashMap<String, Int>(autoplayCandidates.size)
                                     autoplayCandidates.map { item ->
                                         val count = (counts[item.videoId] ?: 0) + 1
                                         counts[item.videoId] = count
-                                        "autoplay_${item.videoId}_$count"
+                                        "autoplay_${item.videoId}_$count" to item
                                     }
                                 }
 
-                                val queueListState = rememberLazyListState()
                                 var draggedKey by remember { mutableStateOf<String?>(null) }
                                 var draggedUpcomingIdx by remember { mutableStateOf<Int?>(null) }
                                 var queueDragOffsetY by remember { mutableFloatStateOf(0f) }
                                 var queueDragDidMove by remember { mutableStateOf(false) }
 
-                                val latestUpcomingSize by rememberUpdatedState(upcoming.size)
+                                val latestUpcomingSize by rememberUpdatedState(keyedUpcoming.size)
                                 val latestCurrentIndex by rememberUpdatedState(currentIndex)
 
                                 fun performDragSwaps(itemKey: String) {
@@ -1103,9 +1103,9 @@ fun NowPlayingSheet(
                                     }
                                 }
 
-                                LaunchedEffect(stableKeys) {
+                                LaunchedEffect(keyedUpcoming) {
                                     val active = draggedKey
-                                    if (active != null && active !in stableKeys) {
+                                    if (active != null && keyedUpcoming.none { it.first == active }) {
                                         draggedKey = null
                                         draggedUpcomingIdx = null
                                         queueDragOffsetY = 0f
@@ -1206,18 +1206,43 @@ fun NowPlayingSheet(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    "Playing Next",
+                                                    style = AuricleTheme.typography.headline,
+                                                    color = Color.White
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(
+                                                            if (upcoming.isNotEmpty()) Color.White.copy(alpha = 0.16f)
+                                                            else Color.White.copy(alpha = 0.10f)
+                                                        )
+                                                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        text = if (upcoming.isNotEmpty()) "${upcoming.size}" else "Empty",
+                                                        style = AuricleTheme.typography.captionSB,
+                                                        color = if (upcoming.isNotEmpty()) {
+                                                            Color.White.copy(alpha = 0.90f)
+                                                        } else {
+                                                            Color.White.copy(alpha = 0.62f)
+                                                        },
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            }
                                             Text(
-                                                "Playing Next",
-                                                style = AuricleTheme.typography.headline,
-                                                color = Color.White
-                                            )
-                                            Text(
-                                                if (partySnapshot.isActive) {
-                                                    "Shared Party Queue · Synced"
-                                                } else if (playingFrom.startsWith("From ", ignoreCase = true)) {
-                                                    playingFrom
-                                                } else {
-                                                    "From $playingFrom"
+                                                when {
+                                                    partySnapshot.isActive -> "Shared Party Queue · Synced"
+                                                    upcoming.isEmpty() -> "Your manual queue"
+                                                    playingFrom.startsWith("From ", ignoreCase = true) -> playingFrom
+                                                    else -> "From $playingFrom"
                                                 },
                                                 style = AuricleTheme.typography.caption,
                                                 color = Color.White.copy(alpha = 0.65f),
@@ -1279,70 +1304,125 @@ fun NowPlayingSheet(
                                         item(key = "queue_top_anchor") {
                                             Spacer(modifier = Modifier.height(0.dp))
                                         }
-                                        itemsIndexed(upcoming, key = { idx, _ -> stableKeys[idx] }) { index, song ->
-                                            val itemKey = stableKeys[index]
-                                            val actualIdx = currentIndex + 1 + index
-                                            val latestUpcomingIdx by rememberUpdatedState(index)
-                                            val isDragged = draggedKey == itemKey
+                                        if (keyedUpcoming.isNotEmpty()) {
+                                            itemsIndexed(
+                                                items = keyedUpcoming,
+                                                key = { _, entry -> entry.first }
+                                            ) { index, (itemKey, song) ->
+                                                val actualIdx = currentIndex + 1 + index
+                                                val latestUpcomingIdx by rememberUpdatedState(index)
+                                                val isDragged = draggedKey == itemKey
 
-                                            OnArtQueueRow(
-                                                song = song,
-                                                onClick = { playbackController.playQueueIndex(actualIdx) },
-                                                onRemove = { playbackController.removeFromQueue(actualIdx) },
-                                                onLongClick = { onSongOptionsClick(song) },
-                                                isAutoplay = false,
-                                                isDragging = isDragged,
-                                                modifier = Modifier
-                                                    .then(if (!isDragged && !reducedMotion) Modifier.animateItem() else Modifier)
-                                                    .zIndex(if (isDragged) 2f else 0f)
-                                                    .graphicsLayer {
-                                                        translationY = if (isDragged) queueDragOffsetY else 0f
-                                                        scaleX = if (isDragged) 1.025f else 1f
-                                                        scaleY = if (isDragged) 1.025f else 1f
-                                                        shadowElevation = if (isDragged) 14f else 0f
-                                                        shape = RoundedCornerShape(12.dp)
-                                                    },
-                                                dragHandleModifier = Modifier.pointerInput(itemKey) {
-                                                    detectDragGestures(
-                                                        onDragStart = {
-                                                            draggedKey = itemKey
-                                                            draggedUpcomingIdx = latestUpcomingIdx
-                                                            queueDragOffsetY = 0f
-                                                            queueDragDidMove = false
-                                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                OnArtQueueRow(
+                                                    song = song,
+                                                    onClick = { playbackController.playQueueIndex(actualIdx) },
+                                                    onRemove = { playbackController.removeFromQueue(actualIdx) },
+                                                    onLongClick = { onSongOptionsClick(song) },
+                                                    isAutoplay = false,
+                                                    isDragging = isDragged,
+                                                    modifier = Modifier
+                                                        .then(if (!isDragged && !reducedMotion) Modifier.animateItem() else Modifier)
+                                                        .zIndex(if (isDragged) 2f else 0f)
+                                                        .graphicsLayer {
+                                                            translationY = if (isDragged) queueDragOffsetY else 0f
+                                                            scaleX = if (isDragged) 1.025f else 1f
+                                                            scaleY = if (isDragged) 1.025f else 1f
+                                                            shadowElevation = if (isDragged) 14f else 0f
+                                                            shape = RoundedCornerShape(12.dp)
                                                         },
-                                                        onDrag = { change, dragAmount ->
-                                                            change.consume()
-                                                            if (draggedKey == itemKey) {
-                                                                queueDragOffsetY += dragAmount.y
-                                                                performDragSwaps(itemKey)
-                                                            }
-                                                        },
-                                                        onDragEnd = {
-                                                            if (draggedKey == itemKey) {
-                                                                if (queueDragDidMove) {
-                                                                    playbackController.syncPartyQueuePreservingPosition()
-                                                                }
-                                                                draggedKey = null
-                                                                draggedUpcomingIdx = null
+                                                    dragHandleModifier = Modifier.pointerInput(itemKey) {
+                                                        detectDragGestures(
+                                                            onDragStart = {
+                                                                draggedKey = itemKey
+                                                                draggedUpcomingIdx = latestUpcomingIdx
                                                                 queueDragOffsetY = 0f
                                                                 queueDragDidMove = false
-                                                            }
-                                                        },
-                                                        onDragCancel = {
-                                                            if (draggedKey == itemKey) {
-                                                                if (queueDragDidMove) {
-                                                                    playbackController.syncPartyQueuePreservingPosition()
+                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                            },
+                                                            onDrag = { change, dragAmount ->
+                                                                change.consume()
+                                                                if (draggedKey == itemKey) {
+                                                                    queueDragOffsetY += dragAmount.y
+                                                                    performDragSwaps(itemKey)
                                                                 }
-                                                                draggedKey = null
-                                                                draggedUpcomingIdx = null
-                                                                queueDragOffsetY = 0f
-                                                                queueDragDidMove = false
+                                                            },
+                                                            onDragEnd = {
+                                                                if (draggedKey == itemKey) {
+                                                                    if (queueDragDidMove) {
+                                                                        playbackController.syncPartyQueuePreservingPosition()
+                                                                    }
+                                                                    draggedKey = null
+                                                                    draggedUpcomingIdx = null
+                                                                    queueDragOffsetY = 0f
+                                                                    queueDragDidMove = false
+                                                                }
+                                                            },
+                                                            onDragCancel = {
+                                                                if (draggedKey == itemKey) {
+                                                                    if (queueDragDidMove) {
+                                                                        playbackController.syncPartyQueuePreservingPosition()
+                                                                    }
+                                                                    draggedKey = null
+                                                                    draggedUpcomingIdx = null
+                                                                    queueDragOffsetY = 0f
+                                                                    queueDragDidMove = false
+                                                                }
                                                             }
-                                                        }
-                                                    )
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        } else {
+                                            item(key = "user_queue_empty") {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 20.dp, vertical = 6.dp)
+                                                        .clip(RoundedCornerShape(14.dp))
+                                                        .background(Color.White.copy(alpha = 0.08f))
+                                                        .border(
+                                                            width = 1.dp,
+                                                            color = Color.White.copy(alpha = 0.14f),
+                                                            shape = RoundedCornerShape(14.dp)
+                                                        )
+                                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                                        .testTag("EmptyUserQueueCard"),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(34.dp)
+                                                            .clip(RoundedCornerShape(10.dp))
+                                                            .background(Color.White.copy(alpha = 0.10f)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = AuricleIcons.Queue,
+                                                            contentDescription = null,
+                                                            tint = Color.White.copy(alpha = 0.72f),
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = "Your queue is empty",
+                                                            style = AuricleTheme.typography.subSB,
+                                                            color = Color.White.copy(alpha = 0.92f),
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                        Text(
+                                                            text = "Use Play Next or Add to Queue, or play an album or playlist.",
+                                                            style = AuricleTheme.typography.caption,
+                                                            color = Color.White.copy(alpha = 0.65f),
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
                                                 }
-                                            )
+                                            }
                                         }
 
                                         if (showAutoplaySection) {
@@ -1350,8 +1430,16 @@ fun NowPlayingSheet(
                                                 Column(
                                                     modifier = Modifier
                                                         .fillMaxWidth()
-                                                        .padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 8.dp)
+                                                        .padding(horizontal = 20.dp)
+                                                        .padding(top = 12.dp, bottom = 8.dp)
                                                 ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(bottom = 14.dp)
+                                                            .height(1.dp)
+                                                            .background(Color.White.copy(alpha = 0.14f))
+                                                    )
                                                     Row(
                                                         modifier = Modifier.fillMaxWidth(),
                                                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1387,23 +1475,25 @@ fun NowPlayingSheet(
                                                             }
                                                         }
                                                     }
-                                                    if (!autoplay) {
-                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                        Text(
-                                                            "Autoplay is off — tap Autoplay above to keep music playing",
-                                                            style = AuricleTheme.typography.caption,
-                                                            color = Color.White.copy(alpha = 0.58f)
-                                                        )
-                                                    }
+                                                    Spacer(modifier = Modifier.height(3.dp))
+                                                    Text(
+                                                        text = if (autoplay) {
+                                                            "Plays automatically after your queue"
+                                                        } else {
+                                                            "Autoplay is off — tap Autoplay above to keep music playing"
+                                                        },
+                                                        style = AuricleTheme.typography.caption,
+                                                        color = Color.White.copy(alpha = 0.58f)
+                                                    )
                                                 }
                                             }
                                         }
 
-                                        if (showAutoplaySection && autoplay && autoplayCandidates.isNotEmpty()) {
+                                        if (showAutoplaySection && autoplay && keyedAutoplay.isNotEmpty()) {
                                             itemsIndexed(
-                                                items = autoplayCandidates,
-                                                key = { idx, _ -> autoplayKeys[idx] }
-                                            ) { idx, candidate ->
+                                                items = keyedAutoplay,
+                                                key = { _, entry -> entry.first }
+                                            ) { idx, (_, candidate) ->
                                                 OnArtQueueRow(
                                                     song = candidate,
                                                     alpha = 0.92f,
@@ -1418,22 +1508,6 @@ fun NowPlayingSheet(
                                                     onLongClick = { onSongOptionsClick(candidate) },
                                                     modifier = if (!reducedMotion) Modifier.animateItem() else Modifier
                                                 )
-                                            }
-                                        } else if (upcoming.isEmpty() && (!showAutoplaySection || !autoplay || !isLoadingAutoplay)) {
-                                            item(key = "queue_empty_card") {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(vertical = 28.dp),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    AuricleStateCard(
-                                                        icon = AuricleIcons.Queue,
-                                                        title = "Queue is empty",
-                                                        subtitle = "Add songs or turn on Autoplay to keep the music going.",
-                                                        onArtwork = true
-                                                    )
-                                                }
                                             }
                                         }
                                     }
