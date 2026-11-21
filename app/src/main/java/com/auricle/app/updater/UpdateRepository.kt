@@ -484,7 +484,9 @@ class UpdateRepository(
                 if (r > c) return true
                 if (r < c) return false
             }
-            return false
+            val remoteIsPre = remote.contains('-')
+            val currentIsPre = current.contains('-')
+            return currentIsPre && !remoteIsPre
         }
 
         fun selectBestApkAsset(assets: List<GitHubAsset>, version: String, supportedAbis: List<String>): GitHubAsset? {

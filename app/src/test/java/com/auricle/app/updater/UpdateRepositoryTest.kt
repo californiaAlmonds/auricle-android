@@ -13,6 +13,9 @@ class UpdateRepositoryTest {
         assertFalse(UpdateRepository.isNewerVersion("v0.2.0", "0.2.0"))
         assertFalse(UpdateRepository.isNewerVersion("v0.1.9", "0.2.0"))
         assertTrue(UpdateRepository.isNewerVersion("v0.10.0", "0.2.0"))
+        assertTrue(UpdateRepository.isNewerVersion("v0.4.0", "0.4.0-RC"))
+        assertFalse(UpdateRepository.isNewerVersion("v0.4.0-RC", "0.4.0"))
+        assertFalse(UpdateRepository.isNewerVersion("v0.4.0-RC", "0.4.0-RC"))
     }
 
     @Test
